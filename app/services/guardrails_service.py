@@ -1,6 +1,5 @@
 import logging
 import re
-
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -32,7 +31,6 @@ def _matches_any_pattern(text: str, patterns: list[str]) -> bool:
 def redact_sensitive_content(text: str) -> str:
     if not isinstance(text, str):
         return ""
-
     redacted = text
     redacted = _EMAIL_RE.sub("[REDACTED_EMAIL]", redacted)
     redacted = _PHONE_RE.sub("[REDACTED_PHONE]", redacted)
@@ -40,7 +38,6 @@ def redact_sensitive_content(text: str) -> str:
     redacted = _AZURE_KEY_ASSIGN_RE.sub(lambda m: m.group(0).split(m.group(1))[0] + "[REDACTED_API_KEY]", redacted)
     redacted = _CARD_RE.sub("[REDACTED_CARD]", redacted)
     return redacted
-
 
 def guard_user_input(user_id: str, prompt: str) -> dict:
     if not settings.guardrails.enable_input_guardrails:
@@ -102,7 +99,6 @@ def apply_context_guardrails(messages: list[dict]) -> dict:
         logger.info("GuardrailContextSanitized | reason=prompt_injection_detected")
 
     return {"blocked": False, "messages": cleaned, "reason": ""}
-
 
 def guard_model_output(text: str) -> dict:
     if not settings.guardrails.enable_output_guardrails:

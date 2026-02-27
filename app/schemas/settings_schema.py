@@ -6,43 +6,43 @@ class AzureOpenAIConfig(BaseModel):
     api_version: str
     primary_deployment: str
     fallback_deployment: str
-    timeout: int
-    max_concurrency: int
+    timeout: int = Field(ge=1, le=120)
+    max_concurrency: int = Field(ge=1, le=1000)
 
 
 class CircuitConfig(BaseModel):
-    fail_max: int
-    reset_timeout: int
+    fail_max: int = Field(ge=1, le=1000)
+    reset_timeout: int = Field(ge=1, le=86400)
 
 
 class UserTokenBudgetConfig(BaseModel):
-    soft_limit: int
-    hard_limit: int
-    min_recent_messages_to_keep: int = 4
+    soft_limit: int = Field(ge=1)
+    hard_limit: int = Field(ge=1)
+    min_recent_messages_to_keep: int = Field(default=4, ge=1, le=1000)
 
 
 class MemoryConfig(BaseModel):
-    max_tokens: int
-    summary_trigger: int
-    summary_ratio: float
-    redis_ttl_seconds: int
-    default_soft_token_budget: int = 2800
-    default_hard_token_budget: int = 3600
-    min_recent_messages_to_keep: int = 4
-    summary_quality_max_ratio: float = 0.6
+    max_tokens: int = Field(ge=1)
+    summary_trigger: int = Field(ge=1)
+    summary_ratio: float = Field(gt=0, le=1)
+    redis_ttl_seconds: int = Field(ge=60)
+    default_soft_token_budget: int = Field(default=2800, ge=1)
+    default_hard_token_budget: int = Field(default=3600, ge=1)
+    min_recent_messages_to_keep: int = Field(default=4, ge=1, le=1000)
+    summary_quality_max_ratio: float = Field(default=0.6, gt=0, le=1)
     user_token_budgets: dict[str, UserTokenBudgetConfig] = Field(default_factory=dict)
     summary_queue_stream_key: str = "memory:summary:jobs"
     summary_queue_dlq_stream_key: str = "memory:summary:dlq"
     summary_queue_group: str = "memory-summary-workers"
-    summary_queue_read_count: int = 10
-    summary_queue_block_ms: int = 5000
-    summary_queue_max_attempts: int = 5
+    summary_queue_read_count: int = Field(default=10, ge=1, le=1000)
+    summary_queue_block_ms: int = Field(default=5000, ge=1, le=60000)
+    summary_queue_max_attempts: int = Field(default=5, ge=1, le=50)
 
 
 class GuardrailsConfig(BaseModel):
-    max_input_chars: int = 8000
-    max_output_chars: int = 8000
-    max_context_messages: int = 60
+    max_input_chars: int = Field(default=8000, ge=1, le=100000)
+    max_output_chars: int = Field(default=8000, ge=1, le=100000)
+    max_context_messages: int = Field(default=60, ge=1, le=1000)
     blocked_input_patterns: list[str] = Field(default_factory=list)
     blocked_output_patterns: list[str] = Field(default_factory=list)
     injection_patterns: list[str] = Field(default_factory=list)
@@ -60,9 +60,32 @@ class AppConfig(BaseModel):
     log_level: str
 
 
+class SecurityConfig(BaseModel):
+    auth_enabled: bool = True
+    jwt_secret: str = Field(min_length=16)
+    jwt_algorithm: str = "HS256"
+    jwt_issuer: str = "ai-system"
+    jwt_exp_minutes: int = Field(default=60, ge=1, le=1440)
+    admin_roles: list[str] = Field(default_factory=lambda: ["admin"])
+
+
+class MiddlewareConfig(BaseModel):
+    timeout_seconds: int = Field(default=35, ge=1, le=120)
+    max_in_flight_requests: int = Field(default=200, ge=1, le=5000)
+    rate_limit_requests: int = Field(default=120, ge=1, le=100000)
+    rate_limit_window_seconds: int = Field(default=60, ge=1, le=3600)
+    enable_request_logging: bool = True
+    enable_rate_limit: bool = True
+    enable_timeout: bool = True
+    enable_backpressure: bool = True
+    enable_route_matching: bool = True
+
+
 class Settings(BaseModel):
     app: AppConfig
     azure_openai: AzureOpenAIConfig
     circuit: CircuitConfig
     memory: MemoryConfig
     guardrails: GuardrailsConfig
+    security: SecurityConfig
+    middleware: MiddlewareConfig

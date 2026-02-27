@@ -51,3 +51,22 @@ guardrails:
   enable_input_guardrails: true
   enable_context_guardrails: true
   enable_output_guardrails: true
+
+security:
+  auth_enabled: true
+  jwt_secret: "change-this-in-prod-very-secret-key"
+  jwt_algorithm: "HS256"
+  jwt_issuer: "ai-system"
+  jwt_exp_minutes: 60
+  admin_roles: ["admin"]
+
+middleware:
+  timeout_seconds: 35
+  max_in_flight_requests: 200
+  rate_limit_requests: 120
+  rate_limit_window_seconds: 60
+  enable_request_logging: true
+  enable_rate_limit: true
+  enable_timeout: true
+  enable_backpressure: true
+  enable_route_matching: true
