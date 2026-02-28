@@ -1,5 +1,6 @@
 import pytest
 from app.services import llm_service
+from app.infra.redis_client import app_scoped_key
 
 
 class FakeRedis:
@@ -31,7 +32,8 @@ class FakeResponse:
 @pytest.mark.asyncio
 async def test_generate_response_returns_cache_hit(monkeypatch):
     fake_redis = FakeRedis()
-    fake_redis.store["chat:user-1:find ai professor"] = "from-cache"
+    cache_key = app_scoped_key("cache", "chat", "user-1", "find ai professor")
+    fake_redis.store[cache_key] = "from-cache"
     monkeypatch.setattr(llm_service, "redis_client", fake_redis)
 
     async def should_not_run(*_args, **_kwargs):
@@ -72,7 +74,8 @@ async def test_generate_response_uses_primary_and_updates_memory(monkeypatch):
     result = await llm_service.generate_response("user-1", "find ai professor")
     assert result == "primary-response"
     assert memory_updates == [("user-1", "find ai professor", "primary-response")]
-    assert fake_redis.store["chat:user-1:find ai professor"] == "primary-response"
+    cache_key = app_scoped_key("cache", "chat", "user-1", "find ai professor")
+    assert fake_redis.store[cache_key] == "primary-response"
 
 
 @pytest.mark.asyncio

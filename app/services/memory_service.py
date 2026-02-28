@@ -8,7 +8,7 @@ from app.core.config import get_settings, get_prompts
 from app.core.memory_crypto import decrypt_memory_payload, encrypt_memory_payload
 from app.core.token_utils import count_tokens
 from app.infra.azure_openai_client import client
-from app.infra.redis_client import redis_client
+from app.infra.redis_client import app_scoped_key, redis_client
 from app.services.memory_compaction_service import (
     safe_token_count,
     select_summary_cutoff,
@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 
 def _redis_key(user_id: str) -> str:
+    return app_scoped_key("memory", "chat", user_id)
+
+
+def _legacy_redis_key(user_id: str) -> str:
     return f"chat:{user_id}"
 
 
@@ -109,6 +113,13 @@ async def load_memory(user_id: str) -> dict:
     except RedisError as exc:
         logger.warning("Redis memory read failed; using empty memory. %s", exc)
         return _empty_memory()
+
+    if not raw:
+        try:
+            raw = redis_client.get(_legacy_redis_key(user_id))
+        except RedisError as exc:
+            logger.warning("Redis legacy memory read failed; using empty memory. %s", exc)
+            return _empty_memory()
 
     if not raw:
         return _empty_memory()

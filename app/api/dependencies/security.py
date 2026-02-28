@@ -65,3 +65,13 @@ def authorize_user_access(principal: Principal, target_user_id: str):
         status_code=status.HTTP_403_FORBIDDEN,
         detail="You are not allowed to access this user's resources.",
     )
+
+
+def authorize_admin_access(principal: Principal):
+    if set(principal.roles).intersection(set(settings.security.admin_roles)):
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="Admin access is required for this resource.",
+    )

@@ -14,3 +14,6 @@ memory:
   summary_queue_read_count: 10
   summary_queue_block_ms: 5000
   summary_queue_max_attempts: 5
+  summary_queue_dlq_alert_threshold: 1
+  summary_queue_dlq_alert_cooldown_seconds: 300
+  summary_queue_dlq_monitor_interval_seconds: 30

@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timezone
 
 from app.core.config import get_settings
-from app.infra.redis_client import redis_client
+from app.infra.redis_client import app_scoped_key, redis_client
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -58,8 +58,8 @@ def record_compaction_metrics(
     logger.info("MemoryCompactionMetrics | %s", json.dumps(payload, sort_keys=True))
 
     try:
-        global_key = "metrics:memory:compaction:global"
-        user_key = f"metrics:memory:compaction:user:{user_id}"
+        global_key = app_scoped_key("metrics", "memory", "compaction", "global")
+        user_key = app_scoped_key("metrics", "memory", "compaction", "user", user_id)
 
         redis_client.hincrby(global_key, "events", 1)
         redis_client.hincrby(global_key, "removed_messages", removed_messages)

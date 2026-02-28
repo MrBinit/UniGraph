@@ -13,6 +13,11 @@ from app.services.memory_service import (
 )
 from app.services.summary_queue_service import (
     ack_summary_job,
+    claim_summary_job_processing,
+    get_summary_job_idempotency_key,
+    is_summary_job_processed,
+    mark_summary_job_processed,
+    release_summary_job_processing,
     retry_or_dlq_summary_job,
 )
 
@@ -50,8 +55,41 @@ async def process_summary_job(stream_id: str, fields: dict):
     job_id = fields.get("job_id", "")
     trigger = fields.get("trigger", "summary_trigger")
     cutoff_seq = _to_int(fields.get("cutoff_seq"), 0)
+    idempotency_key = get_summary_job_idempotency_key(fields)
 
     if not user_id or cutoff_seq <= 0:
+        ack_summary_job(stream_id)
+        return
+
+    if is_summary_job_processed(idempotency_key):
+        logger.info(
+            "SummaryJobSkipped | %s",
+            json.dumps(
+                {
+                    "stream_id": stream_id,
+                    "job_id": job_id,
+                    "user_id": user_id,
+                    "reason": "already_processed",
+                },
+                sort_keys=True,
+            ),
+        )
+        ack_summary_job(stream_id)
+        return
+
+    if not claim_summary_job_processing(idempotency_key, stream_id):
+        logger.info(
+            "SummaryJobSkipped | %s",
+            json.dumps(
+                {
+                    "stream_id": stream_id,
+                    "job_id": job_id,
+                    "user_id": user_id,
+                    "reason": "already_in_progress",
+                },
+                sort_keys=True,
+            ),
+        )
         ack_summary_job(stream_id)
         return
 
@@ -66,6 +104,7 @@ async def process_summary_job(stream_id: str, fields: dict):
                     stale_update["last_summary_job_id"] = ""
                     stale_update["version"] = memory["version"] + 1
                     save_memory_if_version(user_id, memory["version"], stale_update)
+                mark_summary_job_processed(idempotency_key, stream_id)
                 ack_summary_job(stream_id)
                 return
 
@@ -77,6 +116,7 @@ async def process_summary_job(stream_id: str, fields: dict):
                     stale_update["last_summary_job_id"] = ""
                     stale_update["version"] = memory["version"] + 1
                     save_memory_if_version(user_id, memory["version"], stale_update)
+                mark_summary_job_processed(idempotency_key, stream_id)
                 ack_summary_job(stream_id)
                 return
 
@@ -124,10 +164,12 @@ async def process_summary_job(stream_id: str, fields: dict):
                     sort_keys=True,
                 ),
             )
+            mark_summary_job_processed(idempotency_key, stream_id)
             ack_summary_job(stream_id)
             return
 
         raise RuntimeError("version conflict while updating memory")
     except Exception as exc:
+        release_summary_job_processing(idempotency_key)
         logger.exception("Summary job processing failed stream_id=%s", stream_id)
         retry_or_dlq_summary_job(stream_id, fields, str(exc))

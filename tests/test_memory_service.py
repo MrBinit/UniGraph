@@ -4,6 +4,7 @@ from copy import deepcopy
 import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
+from app.infra.redis_client import app_scoped_key
 from app.schemas.settings_schema import UserTokenBudgetConfig
 from app.services import memory_service
 
@@ -56,7 +57,7 @@ class FakeRedis:
 
 
 def _memory_key(user_id: str) -> str:
-    return f"chat:{user_id}"
+    return app_scoped_key("memory", "chat", user_id)
 
 
 def _seed_memory(fake_redis: FakeRedis, user_id: str, memory: dict):

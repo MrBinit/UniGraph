@@ -3,6 +3,7 @@ import logging
 from fastapi import FastAPI
 
 from app.api.v1.chat import router as chat_router
+from app.api.v1.ops import router as ops_router
 from app.core.config import get_settings
 from app.middlewares.backpressure import BackpressureMiddleware
 from app.middlewares.rate_limit import RateLimitMiddleware
@@ -47,6 +48,7 @@ def create_app() -> FastAPI:
         app.add_middleware(RequestLoggingMiddleware)
 
     app.include_router(chat_router, prefix="/api/v1")
+    app.include_router(ops_router, prefix="/api/v1")
     return app
 
 

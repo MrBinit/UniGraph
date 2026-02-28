@@ -37,6 +37,9 @@ class MemoryConfig(BaseModel):
     summary_queue_read_count: int = Field(default=10, ge=1, le=1000)
     summary_queue_block_ms: int = Field(default=5000, ge=1, le=60000)
     summary_queue_max_attempts: int = Field(default=5, ge=1, le=50)
+    summary_queue_dlq_alert_threshold: int = Field(default=1, ge=1, le=100000)
+    summary_queue_dlq_alert_cooldown_seconds: int = Field(default=300, ge=1, le=86400)
+    summary_queue_dlq_monitor_interval_seconds: int = Field(default=30, ge=1, le=3600)
 
 
 class GuardrailsConfig(BaseModel):
@@ -62,6 +65,22 @@ class AppConfig(BaseModel):
     log_level: str
 
 
+class RedisRoleConfig(BaseModel):
+    host: str = "localhost"
+    port: int = Field(default=6379, ge=1, le=65535)
+    db: int = Field(default=0, ge=0, le=15)
+    username: str = ""
+    password: str = ""
+    namespace: str = Field(min_length=1, default="app")
+
+
+class RedisConfig(BaseModel):
+    app: RedisRoleConfig = Field(default_factory=RedisRoleConfig)
+    worker: RedisRoleConfig = Field(
+        default_factory=lambda: RedisRoleConfig(namespace="worker")
+    )
+
+
 class SecurityConfig(BaseModel):
     auth_enabled: bool = True
     jwt_secret: str = Field(min_length=16)
@@ -85,6 +104,7 @@ class MiddlewareConfig(BaseModel):
 
 class Settings(BaseModel):
     app: AppConfig
+    redis: RedisConfig
     azure_openai: AzureOpenAIConfig
     circuit: CircuitConfig
     memory: MemoryConfig

@@ -1,8 +1,9 @@
 import asyncio
 import logging
+import time
 from redis.exceptions import RedisError
 
-from app.infra.redis_client import redis_client
+from app.infra.redis_client import app_scoped_key, redis_client
 from app.infra.azure_openai_client import client
 from app.core.config import get_prompts, get_settings
 from app.services.guardrails_service import (
@@ -18,6 +19,30 @@ prompts = get_prompts()
 logger = logging.getLogger(__name__)
 
 SEMAPHORE = asyncio.Semaphore(settings.azure_openai.max_concurrency)
+
+
+def _latency_metrics_key() -> str:
+    return app_scoped_key("metrics", "llm", "latency")
+
+
+def _record_latency_metrics(started_at: float, outcome: str):
+    latency_ms = max(0, int((time.perf_counter() - started_at) * 1000))
+    key = _latency_metrics_key()
+    try:
+        redis_client.hincrby(key, "count", 1)
+        redis_client.hincrby(key, "total_ms", latency_ms)
+        current_max = redis_client.hget(key, "max_ms")
+        if current_max is None or latency_ms > int(current_max):
+            redis_client.hset(key, "max_ms", latency_ms)
+        redis_client.hset(
+            key,
+            mapping={
+                "last_ms": latency_ms,
+                "last_outcome": outcome,
+            },
+        )
+    except Exception:
+        logger.warning("Latency metrics persistence failed; continuing.")
 
 
 async def _call_primary(messages: list):
@@ -37,6 +62,7 @@ async def _call_fallback(messages: list):
 
 
 async def generate_response(user_id: str, user_prompt: str) -> str:
+    started_at = time.perf_counter()
     input_guard = guard_user_input(user_id, user_prompt)
     if input_guard["blocked"]:
         logger.info(
@@ -44,15 +70,17 @@ async def generate_response(user_id: str, user_prompt: str) -> str:
             user_id,
             input_guard["reason"],
         )
+        _record_latency_metrics(started_at, "blocked_input")
         return refusal_response()
 
     safe_user_prompt = input_guard["sanitized_text"]
-    cache_key = f"chat:{user_id}:{safe_user_prompt}"
+    cache_key = app_scoped_key("cache", "chat", user_id, safe_user_prompt)
 
     # Cache lookup
     try:
         cached = redis_client.get(cache_key)
         if cached:
+            _record_latency_metrics(started_at, "cache_hit")
             return cached
     except RedisError as exc:
         logger.warning("Redis cache read failed. %s", exc)
@@ -70,6 +98,7 @@ async def generate_response(user_id: str, user_prompt: str) -> str:
             user_id,
             context_guard["reason"],
         )
+        _record_latency_metrics(started_at, "blocked_context")
         return refusal_response()
     messages = context_guard["messages"]
 
@@ -121,4 +150,5 @@ async def generate_response(user_id: str, user_prompt: str) -> str:
     except RedisError as exc:
         logger.warning("Redis cache write failed. %s", exc)
 
+    _record_latency_metrics(started_at, "success")
     return result

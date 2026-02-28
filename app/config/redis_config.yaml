@@ -1,0 +1,15 @@
+redis:
+  app:
+    host: "localhost"
+    port: 6379
+    db: 0
+    username: ""
+    password: ""
+    namespace: "app"
+  worker:
+    host: "localhost"
+    port: 6379
+    db: 0
+    username: ""
+    password: ""
+    namespace: "worker"
