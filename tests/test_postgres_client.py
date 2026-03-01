@@ -2,6 +2,7 @@ from app.infra import postgres_client
 
 
 def test_build_postgres_conninfo_uses_yaml_and_env(monkeypatch):
+    """Verify conninfo is built from YAML config and an env-sourced password."""
     cfg = postgres_client.settings.postgres
     original = (
         cfg.enabled,
@@ -16,21 +17,21 @@ def test_build_postgres_conninfo_uses_yaml_and_env(monkeypatch):
 
     try:
         cfg.enabled = True
-        cfg.host = "unigraph.cwjweimqmbri.us-east-1.rds.amazonaws.com"
+        cfg.host = "db.example.test"
         cfg.port = 5432
-        cfg.database = "unigraph"
-        cfg.username = "unigraph"
+        cfg.database = "appdb"
+        cfg.username = "appuser"
         cfg.ssl_mode = "require"
         cfg.connect_timeout_seconds = 10
         cfg.app_name = "unigraph"
-        monkeypatch.setenv("POSTGRES_PASSWORD", "G7k!vP9#rT2$Lm8^")
+        monkeypatch.setenv("POSTGRES_PASSWORD", "Test!Pass#1$X^")
 
         conninfo = postgres_client.build_postgres_conninfo()
 
-        assert "unigraph.cwjweimqmbri.us-east-1.rds.amazonaws.com:5432/unigraph" in conninfo
+        assert "db.example.test:5432/appdb" in conninfo
         assert "sslmode=require" in conninfo
         assert "application_name=unigraph" in conninfo
-        assert "G7k%21vP9%23rT2%24Lm8%5E" in conninfo
+        assert "Test%21Pass%231%24X%5E" in conninfo
     finally:
         (
             cfg.enabled,
@@ -45,6 +46,7 @@ def test_build_postgres_conninfo_uses_yaml_and_env(monkeypatch):
 
 
 def test_postgres_password_is_required(monkeypatch):
+    """Verify building a Postgres connection requires a password in the environment."""
     monkeypatch.delenv("POSTGRES_PASSWORD", raising=False)
     try:
         postgres_client._postgres_password()
