@@ -24,14 +24,17 @@ logger = logging.getLogger(__name__)
 
 
 def _redis_key(user_id: str) -> str:
+    """Build the namespaced Redis key used for a user's short-term memory."""
     return app_scoped_key("memory", "chat", user_id)
 
 
 def _legacy_redis_key(user_id: str) -> str:
+    """Return the legacy Redis key so older memory records remain readable."""
     return f"chat:{user_id}"
 
 
 def _empty_memory() -> dict:
+    """Return the default short-term memory payload for a new user."""
     return {
         "summary": "",
         "messages": [],
@@ -44,6 +47,7 @@ def _empty_memory() -> dict:
 
 
 def _coerce_int(value, default: int) -> int:
+    """Convert a value to int and fall back to the provided default on failure."""
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -51,6 +55,7 @@ def _coerce_int(value, default: int) -> int:
 
 
 def _normalize_memory(raw_memory: dict | None) -> dict:
+    """Sanitize a raw memory payload into the canonical in-memory shape."""
     normalized = _empty_memory()
     if not isinstance(raw_memory, dict):
         return normalized
@@ -89,18 +94,22 @@ def _normalize_memory(raw_memory: dict | None) -> dict:
 
 
 def _get_user_budget(user_id: str) -> tuple[int, int, int]:
+    """Resolve the effective soft limit, hard limit, and recent-message floor for a user."""
     return resolve_user_budget(user_id)
 
 
 def _strip_seq(messages: list[dict]) -> list[dict]:
+    """Remove internal sequence numbers before sending messages to the summarizer."""
     return [{"role": m["role"], "content": m["content"]} for m in messages]
 
 
 def _serialize_memory_payload(memory: dict) -> str:
+    """Normalize and encrypt a memory payload before writing it to Redis."""
     return encrypt_memory_payload(_normalize_memory(memory))
 
 
 def _deserialize_memory_payload(raw: str) -> tuple[dict, bool]:
+    """Decrypt and normalize a Redis memory payload, reporting whether parsing succeeded."""
     parsed = decrypt_memory_payload(raw)
     if not isinstance(parsed, dict):
         return _empty_memory(), False
@@ -108,6 +117,7 @@ def _deserialize_memory_payload(raw: str) -> tuple[dict, bool]:
 
 
 async def load_memory(user_id: str) -> dict:
+    """Load a user's memory from Redis with fallback to the legacy key format."""
     try:
         raw = redis_client.get(_redis_key(user_id))
     except RedisError as exc:
@@ -131,6 +141,7 @@ async def load_memory(user_id: str) -> dict:
 
 
 def save_memory(user_id: str, memory: dict):
+    """Persist the current short-term memory snapshot for a user."""
     normalized = _normalize_memory(memory)
     try:
         redis_client.setex(
@@ -143,6 +154,7 @@ def save_memory(user_id: str, memory: dict):
 
 
 def save_memory_if_version(user_id: str, expected_version: int, memory: dict) -> tuple[bool, dict]:
+    """Atomically save memory only if the stored version matches the expected version."""
     key = _redis_key(user_id)
     normalized_target = _normalize_memory(memory)
 
@@ -180,6 +192,7 @@ def save_memory_if_version(user_id: str, expected_version: int, memory: dict) ->
 
 
 async def summarize_messages(messages: list) -> str:
+    """Generate a compact summary for a batch of older chat messages."""
     if not messages:
         return ""
 
@@ -203,6 +216,7 @@ async def summarize_messages(messages: list) -> str:
 
 
 async def build_context(user_id: str, new_user_message: str) -> list:
+    """Assemble the final chat context and trigger async compaction when needed."""
     memory = await load_memory(user_id)
     soft_limit, hard_limit, min_recent = _get_user_budget(user_id)
 
@@ -291,6 +305,7 @@ async def build_context(user_id: str, new_user_message: str) -> list:
 
 
 async def update_memory(user_id: str, user_message: str, assistant_reply: str):
+    """Append the latest user and assistant messages to short-term memory."""
     memory = await load_memory(user_id)
 
     user_seq = memory["next_seq"]

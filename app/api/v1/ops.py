@@ -12,5 +12,6 @@ router = APIRouter()
 async def ops_status(
     principal: Principal = Depends(get_current_principal),
 ):
+    """Return the current operational status snapshot for admin users."""
     authorize_admin_access(principal)
     return get_ops_status()

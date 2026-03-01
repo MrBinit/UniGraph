@@ -10,6 +10,7 @@ http_bearer = HTTPBearer(auto_error=False)
 
 
 def _roles_from_claim(claim) -> list[str]:
+    """Normalize the JWT roles claim into a list of role strings."""
     if isinstance(claim, list):
         return [str(role) for role in claim if isinstance(role, str)]
     if isinstance(claim, str):
@@ -21,6 +22,7 @@ async def get_current_principal(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(http_bearer),
 ) -> Principal:
+    """Authenticate the request and attach the resolved principal to request state."""
     if not settings.security.auth_enabled:
         principal = Principal(user_id="anonymous", roles=["admin"])
         request.state.user_id = principal.user_id
@@ -55,6 +57,7 @@ async def get_current_principal(
 
 
 def authorize_user_access(principal: Principal, target_user_id: str):
+    """Allow access when the principal owns the resource or has an admin role."""
     if principal.user_id == target_user_id:
         return
 
@@ -68,6 +71,7 @@ def authorize_user_access(principal: Principal, target_user_id: str):
 
 
 def authorize_admin_access(principal: Principal):
+    """Require that the current principal has one of the configured admin roles."""
     if set(principal.roles).intersection(set(settings.security.admin_roles)):
         return
 

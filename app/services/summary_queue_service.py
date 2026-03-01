@@ -17,22 +17,27 @@ _COMPLETED_TTL_SECONDS = 86400
 
 
 def _stream_key() -> str:
+    """Return the worker-scoped Redis stream key for summary jobs."""
     return worker_scoped_key(settings.memory.summary_queue_stream_key)
 
 
 def _dlq_stream_key() -> str:
+    """Return the worker-scoped Redis stream key for summary dead-letter jobs."""
     return worker_scoped_key(settings.memory.summary_queue_dlq_stream_key)
 
 
 def _processing_key(idempotency_key: str) -> str:
+    """Build the Redis key used to mark a summary job as currently processing."""
     return f"{_stream_key()}:processing:{idempotency_key}"
 
 
 def _completed_key(idempotency_key: str) -> str:
+    """Build the Redis key used to mark a summary job as already completed."""
     return f"{_stream_key()}:completed:{idempotency_key}"
 
 
 def _dlq_alert_key() -> str:
+    """Build the Redis key used to throttle DLQ alert emission."""
     return f"{_dlq_stream_key()}:alerted"
 
 
@@ -43,11 +48,13 @@ def build_summary_job_idempotency_key(
     trigger: str,
     enqueue_version: int,
 ) -> str:
+    """Create a deterministic idempotency key for a logical summary job."""
     raw = f"{user_id}:{cutoff_seq}:{trigger}:{enqueue_version}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def get_summary_job_idempotency_key(fields: dict) -> str:
+    """Read or reconstruct the idempotency key from a stream entry payload."""
     explicit = fields.get("idempotency_key")
     if isinstance(explicit, str) and explicit.strip():
         return explicit.strip()
@@ -76,6 +83,7 @@ def get_summary_job_idempotency_key(fields: dict) -> str:
 
 
 def ensure_consumer_group():
+    """Create the Redis consumer group used by summary workers if it does not exist."""
     try:
         worker_redis_client.xgroup_create(
             name=_stream_key(),
@@ -91,6 +99,7 @@ def ensure_consumer_group():
 
 
 def get_summary_dlq_state() -> dict:
+    """Return the current DLQ depth and the latest failed job metadata."""
     try:
         depth = int(worker_redis_client.xlen(_dlq_stream_key()))
         latest = worker_redis_client.xrevrange(_dlq_stream_key(), count=1)
@@ -114,6 +123,7 @@ def get_summary_dlq_state() -> dict:
 
 
 def get_summary_queue_state() -> dict:
+    """Return the current summary stream depth and pending job count."""
     try:
         stream_depth = int(worker_redis_client.xlen(_stream_key()))
     except RedisError as exc:
@@ -139,6 +149,7 @@ def get_summary_queue_state() -> dict:
 
 
 def monitor_summary_dlq(*, force: bool = False) -> dict:
+    """Inspect the DLQ and emit a throttled alert when backlog crosses the threshold."""
     state = get_summary_dlq_state()
     depth = state["depth"]
     threshold = settings.memory.summary_queue_dlq_alert_threshold
@@ -186,6 +197,7 @@ def enqueue_summary_job(
     approx_removed_tokens: int,
     attempt: int = 0,
 ) -> str | None:
+    """Push a new summary compaction job onto the Redis stream."""
     job_id = str(uuid4())
     idempotency_key = build_summary_job_idempotency_key(
         user_id=user_id,
@@ -220,6 +232,7 @@ def enqueue_summary_job(
 
 
 def is_summary_job_processed(idempotency_key: str) -> bool:
+    """Check whether a logical summary job has already been completed."""
     if not idempotency_key:
         return False
     try:
@@ -230,6 +243,7 @@ def is_summary_job_processed(idempotency_key: str) -> bool:
 
 
 def claim_summary_job_processing(idempotency_key: str, stream_id: str) -> bool:
+    """Claim the in-progress marker for a summary job to avoid duplicate processing."""
     if not idempotency_key:
         return True
     try:
@@ -246,6 +260,7 @@ def claim_summary_job_processing(idempotency_key: str, stream_id: str) -> bool:
 
 
 def release_summary_job_processing(idempotency_key: str):
+    """Remove the in-progress marker so a failed job can be retried safely."""
     if not idempotency_key:
         return
     try:
@@ -255,6 +270,7 @@ def release_summary_job_processing(idempotency_key: str):
 
 
 def mark_summary_job_processed(idempotency_key: str, stream_id: str):
+    """Mark a summary job as completed and clear any in-progress marker."""
     if not idempotency_key:
         return
     try:
@@ -269,6 +285,7 @@ def mark_summary_job_processed(idempotency_key: str, stream_id: str):
 
 
 def read_summary_jobs(consumer_name: str) -> list[tuple[str, dict]]:
+    """Read the next batch of summary jobs for a worker consumer."""
     ensure_consumer_group()
     try:
         response = worker_redis_client.xreadgroup(
@@ -290,6 +307,7 @@ def read_summary_jobs(consumer_name: str) -> list[tuple[str, dict]]:
 
 
 def ack_summary_job(stream_id: str):
+    """Acknowledge a processed or discarded summary job in the Redis stream."""
     try:
         worker_redis_client.xack(_stream_key(), settings.memory.summary_queue_group, stream_id)
     except RedisError as exc:
@@ -297,6 +315,7 @@ def ack_summary_job(stream_id: str):
 
 
 def retry_or_dlq_summary_job(stream_id: str, fields: dict, error: str):
+    """Retry a failed summary job or move it to the DLQ after the final attempt."""
     try:
         attempt = int(fields.get("attempt", "0")) + 1
     except (TypeError, ValueError):

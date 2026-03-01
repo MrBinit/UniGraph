@@ -6,6 +6,7 @@ settings = get_settings()
 
 
 def _safe_ping(client) -> bool:
+    """Ping a Redis client and return False instead of raising on failure."""
     try:
         return bool(client.ping())
     except Exception:
@@ -13,6 +14,7 @@ def _safe_ping(client) -> bool:
 
 
 def _read_hash(key: str) -> dict:
+    """Read a Redis hash and return an empty mapping when unavailable."""
     try:
         data = app_redis_client.hgetall(key)
     except Exception:
@@ -21,6 +23,7 @@ def _read_hash(key: str) -> dict:
 
 
 def _to_int(value, default: int = 0) -> int:
+    """Convert a metrics value to int with a safe default."""
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -28,6 +31,7 @@ def _to_int(value, default: int = 0) -> int:
 
 
 def get_ops_status() -> dict:
+    """Collect a snapshot of memory, queue, compaction, and latency health signals."""
     memory_available = _safe_ping(app_redis_client)
     queue_state = get_summary_queue_state()
     dlq_state = get_summary_dlq_state()

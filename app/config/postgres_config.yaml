@@ -1,0 +1,15 @@
+postgres:
+  enabled: true
+  host: "unigraph.cwjweimqmbri.us-east-1.rds.amazonaws.com"
+  port: 5432
+  database: "unigraph"
+  username: "unigraph"
+  ssl_mode: "require"
+  min_pool_size: 1
+  max_pool_size: 10
+  connect_timeout_seconds: 10
+  app_name: "unigraph"
+  schema_name: "unigraph"
+  memory_table: "long_term_memory"
+  embedding_dimensions: 1536
+  default_top_k: 8

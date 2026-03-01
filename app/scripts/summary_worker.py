@@ -3,9 +3,7 @@ import logging
 import os
 import socket
 import time
-
 os.environ.setdefault("REDIS_RUNTIME_ROLE", "worker")
-
 from app.core.config import get_settings
 from app.services.summary_queue_service import ensure_consumer_group, monitor_summary_dlq, read_summary_jobs
 from app.services.summary_worker_service import process_summary_job
@@ -16,6 +14,7 @@ settings = get_settings()
 
 
 def _consumer_name() -> str:
+    """Build the Redis consumer name for this worker process."""
     env_name = os.getenv("SUMMARY_WORKER_CONSUMER")
     if env_name:
         return env_name
@@ -23,6 +22,7 @@ def _consumer_name() -> str:
 
 
 async def run_worker():
+    """Run the long-lived background loop that drains summary jobs."""
     consumer_name = _consumer_name()
     ensure_consumer_group()
     logger.info("Summary worker started consumer=%s", consumer_name)
@@ -44,6 +44,7 @@ async def run_worker():
 
 
 def main():
+    """Start the summary worker event loop from the CLI entrypoint."""
     asyncio.run(run_worker())
 
 

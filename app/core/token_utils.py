@@ -16,6 +16,7 @@ if tiktoken is not None:
         logger.warning("Failed to initialize tiktoken; using fallback token counter. %s", exc)
 
 def count_tokens(messages: list) -> int:
+    """Estimate token usage for a list of chat messages."""
     total = 0
     for msg in messages:
         content = msg.get("content", "")

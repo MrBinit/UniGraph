@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 def _to_int(value, default=0) -> int:
+    """Convert a stream field value to int and fall back when parsing fails."""
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -32,6 +33,7 @@ def _to_int(value, default=0) -> int:
 
 
 def _build_updated_memory(memory: dict, cutoff_seq: int, summary_text: str, job_id: str) -> tuple[dict, list]:
+    """Build the next memory snapshot after summarizing messages up to the cutoff."""
     updated = dict(memory)
     old_messages = [m for m in memory["messages"] if m.get("seq", 0) <= cutoff_seq]
     remaining_messages = [m for m in memory["messages"] if m.get("seq", 0) > cutoff_seq]
@@ -51,6 +53,7 @@ def _build_updated_memory(memory: dict, cutoff_seq: int, summary_text: str, job_
 
 
 async def process_summary_job(stream_id: str, fields: dict):
+    """Process one queued summary job and update short-term memory asynchronously."""
     user_id = fields.get("user_id", "")
     job_id = fields.get("job_id", "")
     trigger = fields.get("trigger", "summary_trigger")

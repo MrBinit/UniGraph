@@ -15,6 +15,7 @@ settings = get_settings()
 
 
 def _configure_logging():
+    """Initialize application logging from the configured log level."""
     level = getattr(logging, settings.app.log_level.upper(), logging.INFO)
     logging.basicConfig(
         level=level,
@@ -23,6 +24,7 @@ def _configure_logging():
 
 
 def create_app() -> FastAPI:
+    """Create and configure the FastAPI application with routes and middleware."""
     _configure_logging()
     app = FastAPI(title=settings.app.name)
 

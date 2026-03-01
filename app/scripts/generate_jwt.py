@@ -4,6 +4,7 @@ from app.core.security import create_access_token
 
 
 def main():
+    """Generate a JWT token for local testing from CLI arguments."""
     parser = argparse.ArgumentParser(description="Generate a JWT for local testing.")
     parser.add_argument("--user-id", required=True, help="Token subject/user_id")
     parser.add_argument(

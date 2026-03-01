@@ -10,12 +10,14 @@ logger = logging.getLogger(__name__)
 
 
 def _token_count_text(text: str, token_counter) -> int:
+    """Estimate token count for a summary string using the shared token counter."""
     if not text:
         return 0
     return token_counter([{"role": "assistant", "content": text}])
 
 
 def _summary_quality_indicator(summary_tokens: int, removed_tokens: int) -> str:
+    """Classify summary quality based on how compressed the result is."""
     if summary_tokens == 0:
         return "empty"
     if removed_tokens <= 0:
@@ -40,6 +42,7 @@ def record_compaction_metrics(
     summary_text: str,
     token_counter,
 ):
+    """Record compaction metrics in logs and Redis for later operational analysis."""
     summary_tokens = _token_count_text(summary_text, token_counter)
     quality = _summary_quality_indicator(summary_tokens, removed_tokens)
 

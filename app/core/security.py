@@ -7,6 +7,7 @@ settings = get_settings()
 
 
 def _secret_key() -> str:
+    """Return the JWT signing key, preferring the environment override."""
     return os.getenv("JWT_SECRET", settings.security.jwt_secret)
 
 
@@ -16,6 +17,7 @@ def create_access_token(
     roles: list[str] | None = None,
     expires_minutes: int | None = None,
 ) -> str:
+    """Create a signed JWT access token for the given user and roles."""
     now = datetime.now(timezone.utc)
     exp_minutes = expires_minutes or settings.security.jwt_exp_minutes
     payload = {
@@ -29,6 +31,7 @@ def create_access_token(
 
 
 def decode_access_token(token: str) -> dict:
+    """Decode and validate a JWT access token."""
     return jwt.decode(
         token,
         _secret_key(),
@@ -39,4 +42,5 @@ def decode_access_token(token: str) -> dict:
 
 
 def is_jwt_error(exc: Exception) -> bool:
+    """Report whether an exception is a JWT parsing or validation error."""
     return isinstance(exc, JWTError)

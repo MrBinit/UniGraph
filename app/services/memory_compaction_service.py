@@ -4,6 +4,7 @@ logger = logging.getLogger(__name__)
 
 
 def compose_context(summary: str, messages: list, new_user_message: str) -> list:
+    """Build the chat context from summary, stored messages, and the new user turn."""
     context = []
     if summary:
         context.append({"role": "system", "content": f"Previous summary: {summary}"})
@@ -14,6 +15,7 @@ def compose_context(summary: str, messages: list, new_user_message: str) -> list
 
 
 def safe_token_count(token_counter, messages: list) -> int:
+    """Count tokens defensively and return zero if token estimation fails."""
     try:
         return token_counter(messages)
     except Exception as exc:  # pragma: no cover
@@ -22,6 +24,7 @@ def safe_token_count(token_counter, messages: list) -> int:
 
 
 def merge_summaries(existing_summary: str, new_summary: str) -> str:
+    """Append a new summary to the existing summary text when both are present."""
     if not existing_summary:
         return new_summary
     if not new_summary:
@@ -30,6 +33,7 @@ def merge_summaries(existing_summary: str, new_summary: str) -> str:
 
 
 def select_summary_cutoff(messages: list, summary_ratio: float) -> tuple[list, int | None]:
+    """Choose the oldest slice of messages that should be summarized next."""
     if not messages:
         return [], None
 
@@ -54,6 +58,7 @@ def truncate_context_without_summary(
     min_recent: int,
     token_counter,
 ) -> dict:
+    """Trim messages and, if required, the summary to keep context within token budgets."""
     events = []
     memory_changed = False
 

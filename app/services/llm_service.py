@@ -22,10 +22,12 @@ SEMAPHORE = asyncio.Semaphore(settings.azure_openai.max_concurrency)
 
 
 def _latency_metrics_key() -> str:
+    """Return the Redis key used to store aggregate LLM latency metrics."""
     return app_scoped_key("metrics", "llm", "latency")
 
 
 def _record_latency_metrics(started_at: float, outcome: str):
+    """Persist request latency metrics for observability and ops reporting."""
     latency_ms = max(0, int((time.perf_counter() - started_at) * 1000))
     key = _latency_metrics_key()
     try:
@@ -46,6 +48,7 @@ def _record_latency_metrics(started_at: float, outcome: str):
 
 
 async def _call_primary(messages: list):
+    """Send the request to the primary Azure OpenAI deployment."""
     return await client.chat.completions.create(
         model=settings.azure_openai.primary_deployment,
         messages=messages,
@@ -54,6 +57,7 @@ async def _call_primary(messages: list):
 
 
 async def _call_fallback(messages: list):
+    """Send the request to the fallback Azure OpenAI deployment."""
     return await client.chat.completions.create(
         model=settings.azure_openai.fallback_deployment,
         messages=messages,
@@ -62,6 +66,7 @@ async def _call_fallback(messages: list):
 
 
 async def generate_response(user_id: str, user_prompt: str) -> str:
+    """Run the full chat pipeline: guardrails, memory, model call, cache, and persistence."""
     started_at = time.perf_counter()
     input_guard = guard_user_input(user_id, user_prompt)
     if input_guard["blocked"]:

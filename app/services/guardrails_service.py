@@ -15,10 +15,12 @@ _CARD_RE = re.compile(r"\b(?:\d[ -]*?){13,16}\b")
 
 
 def refusal_response() -> str:
+    """Return the configured safe refusal response for blocked requests."""
     return settings.guardrails.safe_refusal_message
 
 
 def _matches_any_pattern(text: str, patterns: list[str]) -> bool:
+    """Check whether the text matches any configured regex pattern."""
     for pattern in patterns:
         try:
             if re.search(pattern, text):
@@ -29,6 +31,7 @@ def _matches_any_pattern(text: str, patterns: list[str]) -> bool:
 
 
 def _is_in_domain(text: str) -> bool:
+    """Determine whether text falls within the allowed UniGraph problem domain."""
     if not settings.guardrails.enforce_domain_scope:
         return True
     if not settings.guardrails.domain_allow_patterns:
@@ -37,6 +40,7 @@ def _is_in_domain(text: str) -> bool:
 
 
 def redact_sensitive_content(text: str) -> str:
+    """Redact common sensitive values such as emails, phones, keys, and cards."""
     if not isinstance(text, str):
         return ""
     redacted = text
@@ -48,6 +52,7 @@ def redact_sensitive_content(text: str) -> str:
     return redacted
 
 def guard_user_input(user_id: str, prompt: str) -> dict:
+    """Validate and sanitize user input before it reaches memory or the LLM."""
     if not settings.guardrails.enable_input_guardrails:
         return {"blocked": False, "sanitized_text": prompt, "reason": ""}
 
@@ -71,6 +76,7 @@ def guard_user_input(user_id: str, prompt: str) -> dict:
 
 
 def apply_context_guardrails(messages: list[dict]) -> dict:
+    """Sanitize the assembled model context and prepend the policy message."""
     if not settings.guardrails.enable_context_guardrails:
         return {"blocked": False, "messages": messages, "reason": ""}
 
@@ -115,6 +121,7 @@ def apply_context_guardrails(messages: list[dict]) -> dict:
     return {"blocked": False, "messages": cleaned, "reason": ""}
 
 def guard_model_output(text: str) -> dict:
+    """Validate and sanitize model output before returning it to the caller."""
     if not settings.guardrails.enable_output_guardrails:
         safe_text = text if isinstance(text, str) else ""
         return {"blocked": False, "text": safe_text, "reason": ""}
@@ -136,6 +143,7 @@ def guard_model_output(text: str) -> dict:
 
 
 def sanitize_summary_output(summary_text: str) -> str:
+    """Clean summary text before it is stored back into short-term memory."""
     if not isinstance(summary_text, str):
         return ""
 

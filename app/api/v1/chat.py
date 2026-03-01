@@ -13,6 +13,7 @@ async def chat(
     request: ChatRequest,
     principal: Principal = Depends(get_current_principal),
 ):
+    """Handle the chat endpoint for an authenticated user-scoped request."""
     authorize_user_access(principal, request.user_id)
     result = await generate_response(request.user_id, request.prompt)
     return ChatResponse(response=result)

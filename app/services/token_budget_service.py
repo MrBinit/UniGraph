@@ -4,6 +4,7 @@ settings = get_settings()
 
 
 def resolve_user_budget(user_id: str) -> tuple[int, int, int]:
+    """Resolve the effective token budget limits for a user, including overrides."""
     override = settings.memory.user_token_budgets.get(user_id)
 
     soft_limit = settings.memory.default_soft_token_budget
