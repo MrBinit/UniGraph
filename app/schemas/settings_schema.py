@@ -4,6 +4,7 @@ from app.schemas.app_config_schema import AppConfig
 from app.schemas.azure_openai_config_schema import AzureOpenAIConfig
 from app.schemas.chunking_config_schema import ChunkingConfig
 from app.schemas.circuit_config_schema import CircuitConfig
+from app.schemas.embedding_config_schema import EmbeddingConfig
 from app.schemas.guardrails_config_schema import GuardrailsConfig
 from app.schemas.memory_config_schema import MemoryConfig, UserTokenBudgetConfig
 from app.schemas.middleware_config_schema import MiddlewareConfig
@@ -17,6 +18,7 @@ class Settings(BaseModel):
     redis: RedisConfig
     postgres: PostgresConfig
     chunking: ChunkingConfig
+    embedding: EmbeddingConfig
     azure_openai: AzureOpenAIConfig
     circuit: CircuitConfig
     memory: MemoryConfig
@@ -30,6 +32,7 @@ __all__ = [
     "AzureOpenAIConfig",
     "ChunkingConfig",
     "CircuitConfig",
+    "EmbeddingConfig",
     "GuardrailsConfig",
     "MemoryConfig",
     "MiddlewareConfig",

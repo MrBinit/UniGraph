@@ -1,0 +1,9 @@
+embedding:
+  enabled: true
+  provider: "bedrock"
+  region_name: "us-east-1"
+  model_id: "amazon.titan-embed-text-v2:0"
+  input_dir: "data/chunks"
+  output_dir: "data/embeddings"
+  glob_pattern: "*.chunks.json"
+  max_text_chars: 20000
