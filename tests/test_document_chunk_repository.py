@@ -70,3 +70,76 @@ def test_ingest_embedding_manifest_upserts_chunks(monkeypatch):
     assert params[0] == "university_1"
     assert params[1] == "university_1:0000"
     assert params[-1] == "[0.10000000,0.20000000,0.30000000]"
+
+
+def test_search_document_chunks_uses_ann_query_without_filters(monkeypatch):
+    class _SearchCursor(_FakeCursor):
+        def fetchall(self):
+            return [
+                {
+                    "chunk_id": "university_1:0002",
+                    "document_id": "university_1",
+                    "chunk_index": 2,
+                    "source_file": "university_1.md",
+                    "source_path": "/tmp/university_1.md",
+                    "content": "Program Overview for the master's program.",
+                    "char_count": 41,
+                    "metadata": {"country": "Germany", "entity_type": "program"},
+                    "distance": 0.123,
+                }
+            ]
+
+    cursor = _SearchCursor()
+    monkeypatch.setattr(document_chunk_repository, "get_postgres_pool", lambda: _FakePool(cursor))
+
+    results = document_chunk_repository.search_document_chunks(
+        embedding=[0.1, 0.2, 0.3],
+        limit=3,
+    )
+
+    assert len(results) == 1
+    assert "ORDER BY embedding <=> %s::vector" in cursor.calls[0][0]
+    assert "metadata @> %s::jsonb" not in cursor.calls[0][0]
+    params = cursor.calls[0][1]
+    assert params[0] == "[0.10000000,0.20000000,0.30000000]"
+    assert params[1] == "[0.10000000,0.20000000,0.30000000]"
+    assert params[2] == 3
+    assert results[0]["distance"] == 0.123
+
+
+def test_search_document_chunks_uses_filtered_exact_strategy(monkeypatch):
+    class _SearchCursor(_FakeCursor):
+        def fetchall(self):
+            return [
+                {
+                    "chunk_id": "university_1:0002",
+                    "document_id": "university_1",
+                    "chunk_index": 2,
+                    "source_file": "university_1.md",
+                    "source_path": "/tmp/university_1.md",
+                    "content": "Program Overview for the master's program.",
+                    "char_count": 41,
+                    "metadata": {"country": "Germany", "entity_type": "program"},
+                    "distance": 0.123,
+                }
+            ]
+
+    cursor = _SearchCursor()
+    monkeypatch.setattr(document_chunk_repository, "get_postgres_pool", lambda: _FakePool(cursor))
+
+    results = document_chunk_repository.search_document_chunks(
+        embedding=[0.1, 0.2, 0.3],
+        limit=3,
+        metadata_filters={"country": "Germany", "entity_type": "program"},
+    )
+
+    assert len(results) == 1
+    assert "WITH filtered_chunks AS MATERIALIZED" in cursor.calls[0][0]
+    assert "metadata @> %s::jsonb" in cursor.calls[0][0]
+    assert "ORDER BY embedding <=> %s::vector" in cursor.calls[0][0]
+    params = cursor.calls[0][1]
+    assert params[0] == '{"country": "Germany", "entity_type": "program"}'
+    assert params[1] == "[0.10000000,0.20000000,0.30000000]"
+    assert params[2] == "[0.10000000,0.20000000,0.30000000]"
+    assert params[3] == 3
+    assert results[0]["distance"] == 0.123

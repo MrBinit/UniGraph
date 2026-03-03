@@ -12,5 +12,5 @@ postgres:
   schema_name: "unigraph"
   memory_table: "long_term_memory"
   chunk_table: "document_chunks"
-  embedding_dimensions: 1536
+  embedding_dimensions: 1024
   default_top_k: 8

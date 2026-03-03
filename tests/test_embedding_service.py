@@ -1,3 +1,4 @@
+import asyncio
 import json
 from io import BytesIO
 from pathlib import Path
@@ -69,3 +70,11 @@ def test_embed_chunk_manifest_writes_embedding_output(tmp_path: Path, monkeypatc
     assert payload["embedding_model"] == embedding_service.settings.embedding.model_id
     assert payload["embedding_dimensions"] == 4
     assert payload["chunks"][0]["embedding"] == [1.0, 2.0, 3.0, 4.0]
+
+
+def test_aembed_text_uses_async_wrapper(monkeypatch):
+    monkeypatch.setattr(embedding_service, "embed_text", lambda text: [9.0, 8.0, 7.0])
+
+    vector = asyncio.run(embedding_service.aembed_text("async test"))
+
+    assert vector == [9.0, 8.0, 7.0]

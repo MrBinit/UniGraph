@@ -16,6 +16,115 @@ def _vector_literal(embedding: list[float]) -> str:
     return f"[{values}]"
 
 
+def _row_to_search_result(row: dict) -> dict:
+    """Convert a database row into a plain retrieval result mapping."""
+    metadata = row.get("metadata") or {}
+    return {
+        "chunk_id": str(row["chunk_id"]),
+        "document_id": str(row["document_id"]),
+        "chunk_index": int(row["chunk_index"]),
+        "source_file": str(row["source_file"]),
+        "source_path": str(row["source_path"]),
+        "content": str(row["content"]),
+        "char_count": int(row["char_count"]),
+        "metadata": metadata if isinstance(metadata, dict) else {},
+        "distance": float(row["distance"]) if row.get("distance") is not None else 0.0,
+    }
+
+
+def _normalize_metadata_filters(metadata_filters: dict[str, str] | None) -> dict[str, str]:
+    """Normalize metadata filters into a non-empty string mapping."""
+    if not metadata_filters:
+        return {}
+    return {
+        str(key): str(value)
+        for key, value in metadata_filters.items()
+        if value is not None and str(value).strip()
+    }
+
+
+def resolve_document_chunk_search_strategy(metadata_filters: dict[str, str] | None) -> str:
+    """Choose the retrieval strategy for the current filter shape."""
+    return "filtered_exact" if _normalize_metadata_filters(metadata_filters) else "ann"
+
+
+def _search_document_chunks_ann(*, vector_value: str, top_k: int) -> list[dict]:
+    """Run KNN vector search using the pgvector ANN index without metadata filters."""
+    sql = f"""
+        SELECT
+            chunk_id,
+            document_id,
+            chunk_index,
+            source_file,
+            source_path,
+            content,
+            char_count,
+            metadata,
+            embedding <=> %s::vector AS distance
+        FROM {_qualified_chunk_table()}
+        WHERE embedding IS NOT NULL
+        ORDER BY embedding <=> %s::vector
+        LIMIT %s
+    """
+
+    params = (vector_value, vector_value, top_k)
+    pool = get_postgres_pool()
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    return [_row_to_search_result(row) for row in rows]
+
+
+def _search_document_chunks_filtered_exact(
+    *,
+    vector_value: str,
+    top_k: int,
+    metadata_filters: dict[str, str],
+) -> list[dict]:
+    """Filter by metadata first, then rerank the reduced subset by exact vector distance."""
+    sql = f"""
+        WITH filtered_chunks AS MATERIALIZED (
+            SELECT
+                chunk_id,
+                document_id,
+                chunk_index,
+                source_file,
+                source_path,
+                content,
+                char_count,
+                metadata,
+                embedding
+            FROM {_qualified_chunk_table()}
+            WHERE embedding IS NOT NULL
+              AND metadata @> %s::jsonb
+        )
+        SELECT
+            chunk_id,
+            document_id,
+            chunk_index,
+            source_file,
+            source_path,
+            content,
+            char_count,
+            metadata,
+            embedding <=> %s::vector AS distance
+        FROM filtered_chunks
+        ORDER BY embedding <=> %s::vector
+        LIMIT %s
+    """
+
+    params = (json.dumps(metadata_filters), vector_value, vector_value, top_k)
+    pool = get_postgres_pool()
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+
+    return [_row_to_search_result(row) for row in rows]
+
+
 def ensure_document_chunk_table() -> None:
     """Create the retrieval chunk table and indexes if they do not already exist."""
     pool = get_postgres_pool()
@@ -124,3 +233,25 @@ def ingest_embedding_manifest(payload: dict) -> int:
         upsert_document_chunk(chunk)
         count += 1
     return count
+
+
+def search_document_chunks(
+    *,
+    embedding: list[float],
+    limit: int = 5,
+    metadata_filters: dict[str, str] | None = None,
+) -> list[dict]:
+    """Search embedded document chunks with ANN for unfiltered search and exact reranking for filtered search."""
+    if not embedding:
+        raise ValueError("A query embedding is required for document chunk search.")
+
+    top_k = max(1, limit)
+    vector_value = _vector_literal(embedding)
+    normalized_filters = _normalize_metadata_filters(metadata_filters)
+    if normalized_filters:
+        return _search_document_chunks_filtered_exact(
+            vector_value=vector_value,
+            top_k=top_k,
+            metadata_filters=normalized_filters,
+        )
+    return _search_document_chunks_ann(vector_value=vector_value, top_k=top_k)

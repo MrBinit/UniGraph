@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,6 +61,11 @@ def embed_text(text: str) -> list[float]:
     return _coerce_embedding(response_payload)
 
 
+async def aembed_text(text: str) -> list[float]:
+    """Generate a Bedrock embedding vector without blocking the event loop."""
+    return await asyncio.to_thread(embed_text, text)
+
+
 def embed_chunk_manifest(chunk_manifest_path: Path, output_dir: Path | None = None) -> Path:
     """Embed every chunk in one chunk manifest and persist an embedding manifest."""
     payload = _load_chunk_manifest(chunk_manifest_path)
@@ -93,6 +99,11 @@ def embed_chunk_manifest(chunk_manifest_path: Path, output_dir: Path | None = No
     return output_path
 
 
+async def aembed_chunk_manifest(chunk_manifest_path: Path, output_dir: Path | None = None) -> Path:
+    """Embed one chunk manifest without blocking the event loop."""
+    return await asyncio.to_thread(embed_chunk_manifest, chunk_manifest_path, output_dir)
+
+
 def embed_configured_chunk_manifests() -> list[Path]:
     """Embed all configured chunk manifests and return the output file paths."""
     if not settings.embedding.enabled:
@@ -105,3 +116,20 @@ def embed_configured_chunk_manifests() -> list[Path]:
         if chunk_manifest_path.is_file():
             output_paths.append(embed_chunk_manifest(chunk_manifest_path, output_dir))
     return output_paths
+
+
+async def aembed_configured_chunk_manifests() -> list[Path]:
+    """Embed all configured chunk manifests without blocking the event loop."""
+    if not settings.embedding.enabled:
+        return []
+
+    input_dir = _resolve_path(settings.embedding.input_dir)
+    output_dir = _resolve_path(settings.embedding.output_dir)
+    manifest_paths = [
+        chunk_manifest_path
+        for chunk_manifest_path in sorted(input_dir.glob(settings.embedding.glob_pattern))
+        if chunk_manifest_path.is_file()
+    ]
+    return await asyncio.gather(
+        *(aembed_chunk_manifest(chunk_manifest_path, output_dir) for chunk_manifest_path in manifest_paths)
+    )
