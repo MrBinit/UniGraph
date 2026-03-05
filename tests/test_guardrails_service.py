@@ -57,3 +57,19 @@ def test_guard_user_input_allows_university_scope_query():
         "Find professors in AI research lab at Stanford University",
     )
     assert result["blocked"] is False
+
+
+def test_guard_user_input_allows_plural_lab_scope_query():
+    result = guardrails_service.guard_user_input(
+        "user-1",
+        "Find AI labs in Germany working on secure AI systems",
+    )
+    assert result["blocked"] is False
+
+
+def test_guard_user_input_allows_german_universities_query():
+    result = guardrails_service.guard_user_input(
+        "user-1",
+        "Find me german universities. I need only names of the universities.",
+    )
+    assert result["blocked"] is False

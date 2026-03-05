@@ -12,3 +12,5 @@ class EmbeddingConfig(BaseModel):
     output_dir: str = "data/embeddings"
     glob_pattern: str = "*.chunks.json"
     max_text_chars: int = Field(default=20000, ge=100, le=200000)
+    max_concurrency: int = Field(default=4, ge=1, le=64)
+    cache_ttl_seconds: int = Field(default=86400, ge=60, le=604800)

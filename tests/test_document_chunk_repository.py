@@ -41,6 +41,23 @@ class _FakePool:
         return _FakeConnection(self._cursor)
 
 
+def test_vector_index_sql_uses_hnsw_config():
+    cfg = document_chunk_repository.settings.postgres
+    original = (cfg.vector_index_type, cfg.hnsw_m, cfg.hnsw_ef_construction)
+    try:
+        cfg.vector_index_type = "hnsw"
+        cfg.hnsw_m = 24
+        cfg.hnsw_ef_construction = 96
+        sql = document_chunk_repository._vector_index_sql(if_not_exists=False)
+    finally:
+        cfg.vector_index_type, cfg.hnsw_m, cfg.hnsw_ef_construction = original
+
+    assert "CREATE INDEX idx_doc_chunks_embedding" in sql
+    assert "USING hnsw" in sql
+    assert "m = 24" in sql
+    assert "ef_construction = 96" in sql
+
+
 def test_ingest_embedding_manifest_upserts_chunks(monkeypatch):
     cursor = _FakeCursor()
     monkeypatch.setattr(document_chunk_repository, "get_postgres_pool", lambda: _FakePool(cursor))
@@ -63,13 +80,26 @@ def test_ingest_embedding_manifest_upserts_chunks(monkeypatch):
     )
 
     assert count == 1
-    assert len(cursor.calls) == 2
+    assert len(cursor.calls) == 3
     assert "CREATE TABLE IF NOT EXISTS" in cursor.calls[0][0]
-    assert "INSERT INTO" in cursor.calls[1][0]
-    params = cursor.calls[1][1]
+    assert "CREATE INDEX IF NOT EXISTS idx_doc_chunks_embedding" in cursor.calls[1][0]
+    assert "INSERT INTO" in cursor.calls[2][0]
+    params = cursor.calls[2][1]
     assert params[0] == "university_1"
     assert params[1] == "university_1:0000"
     assert params[-1] == "[0.10000000,0.20000000,0.30000000]"
+
+
+def test_resolve_document_chunk_search_strategy_uses_hnsw_without_filters():
+    cfg = document_chunk_repository.settings.postgres
+    original = cfg.vector_index_type
+    try:
+        cfg.vector_index_type = "hnsw"
+        strategy = document_chunk_repository.resolve_document_chunk_search_strategy(None)
+    finally:
+        cfg.vector_index_type = original
+
+    assert strategy == "hnsw"
 
 
 def test_search_document_chunks_uses_ann_query_without_filters(monkeypatch):
@@ -143,3 +173,20 @@ def test_search_document_chunks_uses_filtered_exact_strategy(monkeypatch):
     assert params[2] == "[0.10000000,0.20000000,0.30000000]"
     assert params[3] == 3
     assert results[0]["distance"] == 0.123
+
+
+def test_rebuild_document_chunk_vector_index_uses_configured_type(monkeypatch):
+    cursor = _FakeCursor()
+    monkeypatch.setattr(document_chunk_repository, "get_postgres_pool", lambda: _FakePool(cursor))
+
+    cfg = document_chunk_repository.settings.postgres
+    original = cfg.vector_index_type
+    try:
+        cfg.vector_index_type = "hnsw"
+        index_type = document_chunk_repository.rebuild_document_chunk_vector_index()
+    finally:
+        cfg.vector_index_type = original
+
+    assert index_type == "hnsw"
+    assert "DROP INDEX IF EXISTS" in cursor.calls[0][0]
+    assert "USING hnsw" in cursor.calls[0][0]

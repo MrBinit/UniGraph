@@ -267,4 +267,8 @@ def test_api_to_queue_to_worker_to_memory_update(monkeypatch):
     assert payload["queue"]["dlq_depth"] == 0
     assert payload["compaction"]["events"] == 1
     assert payload["latency"]["count"] >= 1
+    assert payload["latency"]["pipeline_count"] >= 1
+    assert payload["latency"]["last_build_context_ms"] >= 0
+    assert payload["latency"]["last_retrieval_ms"] >= 0
+    assert payload["latency"]["last_model_ms"] >= 0
     assert payload["latency"]["last_outcome"] == "success"

@@ -43,6 +43,7 @@ def get_ops_status() -> dict:
     latency_raw = _read_hash(latency_key)
     latency_count = _to_int(latency_raw.get("count", 0))
     latency_total_ms = _to_int(latency_raw.get("total_ms", 0))
+    pipeline_count = _to_int(latency_raw.get("pipeline_count", 0))
 
     status = "ok"
     if not memory_available:
@@ -52,6 +53,21 @@ def get_ops_status() -> dict:
 
     latest_dlq = dlq_state.get("latest") or {}
     average_ms = round(latency_total_ms / latency_count, 2) if latency_count else 0.0
+    average_build_context_ms = (
+        round(_to_int(latency_raw.get("build_context_total_ms", 0)) / pipeline_count, 2)
+        if pipeline_count
+        else 0.0
+    )
+    average_retrieval_ms = (
+        round(_to_int(latency_raw.get("retrieval_total_ms", 0)) / pipeline_count, 2)
+        if pipeline_count
+        else 0.0
+    )
+    average_model_ms = (
+        round(_to_int(latency_raw.get("model_total_ms", 0)) / pipeline_count, 2)
+        if pipeline_count
+        else 0.0
+    )
 
     return {
         "status": status,
@@ -74,9 +90,18 @@ def get_ops_status() -> dict:
         },
         "latency": {
             "count": latency_count,
+            "pipeline_count": pipeline_count,
             "average_ms": average_ms,
+            "average_build_context_ms": average_build_context_ms,
+            "average_retrieval_ms": average_retrieval_ms,
+            "average_model_ms": average_model_ms,
             "max_ms": _to_int(latency_raw.get("max_ms", 0)),
             "last_ms": _to_int(latency_raw.get("last_ms", 0)),
+            "last_build_context_ms": _to_int(latency_raw.get("last_build_context_ms", 0)),
+            "last_retrieval_ms": _to_int(latency_raw.get("last_retrieval_ms", 0)),
+            "last_model_ms": _to_int(latency_raw.get("last_model_ms", 0)),
+            "last_retrieval_strategy": str(latency_raw.get("last_retrieval_strategy", "")),
+            "last_retrieved_count": _to_int(latency_raw.get("last_retrieved_count", 0)),
             "last_outcome": str(latency_raw.get("last_outcome", "")),
         },
     }

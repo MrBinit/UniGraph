@@ -4,12 +4,13 @@ guardrails:
   max_context_messages: 60
   enforce_domain_scope: true
   domain_allow_patterns:
-    - "(?i)\\b(university|college|institute|school|department|faculty)\\b"
-    - "(?i)\\b(professor|lecturer|advisor|supervisor)\\b"
-    - "(?i)\\b(research\\s*lab|laboratory|lab\\s*group|research\\s*group)\\b"
-    - "(?i)\\b(course|courses|curriculum|syllabus|class|classes|module|modules)\\b"
-    - "(?i)\\b(phd|doctorate|masters|master|bachelor|admission|admissions)\\b"
-    - "(?i)\\b(research\\s+interest|research\\s+interests|research\\s+area|research\\s+areas)\\b"
+    - "(?i)\\b(university|universities|college|colleges|institute|institutes|school|schools|department|departments|faculty|faculties)\\b"
+    - "(?i)\\b(germany|german|deutschland)\\b"
+    - "(?i)\\b(ai|artificial\\s+intelligence|machine\\s+learning|ml|llm|nlp|robotics)\\b"
+    - "(?i)\\b(lab|labs|research\\s*lab|research\\s*labs|laboratory|laboratories|lab\\s*group|lab\\s*groups|research\\s*group|research\\s*groups|research\\s*center|research\\s*centers|research\\s*centre|research\\s*centres)\\b"
+    - "(?i)\\b(research|researcher|researchers|research\\s+interest|research\\s+interests|research\\s+area|research\\s+areas)\\b"
+    - "(?i)\\b(professor|professors|lecturer|lecturers|advisor|advisors|supervisor|supervisors)\\b"
+    - "(?i)\\b(course|courses|curriculum|syllabus|class|classes|module|modules|program|programs|degree|degrees|masters|master|phd|doctorate|bachelor)\\b"
   blocked_input_patterns:
     - "(?i)\\b(build|make)\\s+(a\\s+)?bomb\\b"
     - "(?i)\\bhow\\s+to\\s+harm\\s+someone\\b"

@@ -7,3 +7,5 @@ embedding:
   output_dir: "data/embeddings"
   glob_pattern: "*.chunks.json"
   max_text_chars: 20000
+  max_concurrency: 4
+  cache_ttl_seconds: 86400

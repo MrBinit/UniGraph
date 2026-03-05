@@ -31,9 +31,18 @@ class LatencyHealth(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     count: int = Field(ge=0)
+    pipeline_count: int = Field(ge=0)
     average_ms: float = Field(ge=0)
+    average_build_context_ms: float = Field(ge=0)
+    average_retrieval_ms: float = Field(ge=0)
+    average_model_ms: float = Field(ge=0)
     max_ms: int = Field(ge=0)
     last_ms: int = Field(ge=0)
+    last_build_context_ms: int = Field(ge=0)
+    last_retrieval_ms: int = Field(ge=0)
+    last_model_ms: int = Field(ge=0)
+    last_retrieval_strategy: str = ""
+    last_retrieved_count: int = Field(ge=0)
     last_outcome: str = ""
 
 

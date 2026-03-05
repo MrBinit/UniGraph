@@ -62,18 +62,35 @@ async def test_generate_response_uses_primary_and_updates_memory(monkeypatch):
         raise AssertionError("fallback should not run when primary succeeds")
 
     memory_updates = []
+    retrieval_queries = []
 
     async def fake_update_memory(user_id, user_message, assistant_reply):
         memory_updates.append((user_id, user_message, assistant_reply))
+
+    async def fake_retrieve_document_chunks(query, **kwargs):
+        retrieval_queries.append((query, kwargs))
+        return {
+            "results": [
+                {
+                    "content": "Distributed Security Systems Lab focuses on scalable and secure AI infrastructure.",
+                    "metadata": {
+                        "university": "Falkenberg University of Cybernetics (FUC)",
+                        "section_heading": "Distributed Security Systems Lab (DSSL)",
+                    },
+                }
+            ]
+        }
 
     monkeypatch.setattr(llm_service, "build_context", fake_build_context)
     monkeypatch.setattr(llm_service, "_call_primary", fake_primary)
     monkeypatch.setattr(llm_service, "_call_fallback", fake_fallback)
     monkeypatch.setattr(llm_service, "update_memory", fake_update_memory)
+    monkeypatch.setattr(llm_service, "aretrieve_document_chunks", fake_retrieve_document_chunks)
 
     result = await llm_service.generate_response("user-1", "find ai professor")
     assert result == "primary-response"
     assert memory_updates == [("user-1", "find ai professor", "primary-response")]
+    assert retrieval_queries[0][0] == "find ai professor"
     cache_key = app_scoped_key("cache", "chat", "user-1", "find ai professor")
     assert fake_redis.store[cache_key] == "primary-response"
 
@@ -95,10 +112,14 @@ async def test_generate_response_uses_fallback_when_primary_fails(monkeypatch):
     async def fake_update_memory(*_args, **_kwargs):
         return None
 
+    async def fake_retrieve_document_chunks(*_args, **_kwargs):
+        return {"results": []}
+
     monkeypatch.setattr(llm_service, "build_context", fake_build_context)
     monkeypatch.setattr(llm_service, "_call_primary", fake_primary)
     monkeypatch.setattr(llm_service, "_call_fallback", fake_fallback)
     monkeypatch.setattr(llm_service, "update_memory", fake_update_memory)
+    monkeypatch.setattr(llm_service, "aretrieve_document_chunks", fake_retrieve_document_chunks)
 
     result = await llm_service.generate_response("user-1", "find university course")
     assert result == "fallback-response"
@@ -118,9 +139,13 @@ async def test_generate_response_raises_when_both_models_fail(monkeypatch):
     async def fake_fallback(_messages):
         raise RuntimeError("fallback down")
 
+    async def fake_retrieve_document_chunks(*_args, **_kwargs):
+        return {"results": []}
+
     monkeypatch.setattr(llm_service, "build_context", fake_build_context)
     monkeypatch.setattr(llm_service, "_call_primary", fake_primary)
     monkeypatch.setattr(llm_service, "_call_fallback", fake_fallback)
+    monkeypatch.setattr(llm_service, "aretrieve_document_chunks", fake_retrieve_document_chunks)
 
     with pytest.raises(RuntimeError, match="fallback down"):
         await llm_service.generate_response("user-1", "find university course")
@@ -155,6 +180,8 @@ async def test_generate_response_injects_chat_system_prompt(monkeypatch):
     def fake_apply_context_guardrails(messages):
         assert messages[0]["role"] == "system"
         assert "UniGraph" in messages[0]["content"]
+        assert messages[1]["role"] == "system"
+        assert "Retrieved long-term knowledge" in messages[1]["content"]
         return {"blocked": False, "messages": messages, "reason": ""}
 
     async def fake_primary(_messages):
@@ -163,10 +190,24 @@ async def test_generate_response_injects_chat_system_prompt(monkeypatch):
     async def fake_update_memory(*_args, **_kwargs):
         return None
 
+    async def fake_retrieve_document_chunks(*_args, **_kwargs):
+        return {
+            "results": [
+                {
+                    "content": "Master of Science in Artificial Intelligence Systems is offered in Germany.",
+                    "metadata": {
+                        "university": "Rheinberg Technical University (RTU)",
+                        "section_heading": "Master of Science in Artificial Intelligence Systems",
+                    },
+                }
+            ]
+        }
+
     monkeypatch.setattr(llm_service, "build_context", fake_build_context)
     monkeypatch.setattr(llm_service, "apply_context_guardrails", fake_apply_context_guardrails)
     monkeypatch.setattr(llm_service, "_call_primary", fake_primary)
     monkeypatch.setattr(llm_service, "update_memory", fake_update_memory)
+    monkeypatch.setattr(llm_service, "aretrieve_document_chunks", fake_retrieve_document_chunks)
 
     result = await llm_service.generate_response("user-1", "find university course")
     assert result == "primary-response"

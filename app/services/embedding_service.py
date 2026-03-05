@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 from app.core.config import get_settings
 from app.core.paths import resolve_project_path
 from app.infra.bedrock_client import get_bedrock_runtime_client
+from app.infra.redis_client import app_scoped_key, redis_client
 
 settings = get_settings()
 
@@ -42,12 +44,73 @@ def _coerce_embedding(response_payload: dict) -> list[float]:
     return [float(value) for value in embedding]
 
 
-def embed_text(text: str) -> list[float]:
-    """Generate a Bedrock embedding vector for one text input."""
+def _build_embedded_chunk(chunk: dict, vector: list[float]) -> dict:
+    """Attach an embedding vector to a chunk payload."""
+    embedded_chunk = dict(chunk)
+    embedded_chunk["embedding"] = vector
+    return embedded_chunk
+
+
+def _normalized_embed_text(text: str) -> str:
+    """Normalize raw input text into the exact string sent to the embedding model."""
     if not isinstance(text, str) or not text.strip():
         raise ValueError("Text to embed must be a non-empty string.")
+    return text.strip()[: settings.embedding.max_text_chars]
 
-    truncated = text.strip()[: settings.embedding.max_text_chars]
+
+def _embedding_cache_key(text: str) -> str:
+    """Build the Redis cache key for a normalized embedding input."""
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return app_scoped_key(
+        "cache",
+        "embedding",
+        settings.embedding.provider,
+        settings.embedding.region_name,
+        settings.embedding.model_id,
+        digest,
+    )
+
+
+def _read_cached_embedding(cache_key: str) -> list[float] | None:
+    """Load a cached embedding vector from Redis when available."""
+    try:
+        cached = redis_client.get(cache_key)
+    except Exception:
+        return None
+    if not cached:
+        return None
+    try:
+        payload = json.loads(cached)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, list) or not payload:
+        return None
+    try:
+        return [float(value) for value in payload]
+    except (TypeError, ValueError):
+        return None
+
+
+def _write_cached_embedding(cache_key: str, embedding: list[float]) -> None:
+    """Persist an embedding vector in Redis with the configured TTL."""
+    try:
+        redis_client.setex(
+            cache_key,
+            settings.embedding.cache_ttl_seconds,
+            json.dumps(embedding),
+        )
+    except Exception:
+        return
+
+
+def embed_text(text: str) -> list[float]:
+    """Generate a Bedrock embedding vector for one text input."""
+    truncated = _normalized_embed_text(text)
+    cache_key = _embedding_cache_key(truncated)
+    cached_embedding = _read_cached_embedding(cache_key)
+    if cached_embedding is not None:
+        return cached_embedding
+
     client = get_bedrock_runtime_client()
     response = client.invoke_model(
         modelId=settings.embedding.model_id,
@@ -58,7 +121,9 @@ def embed_text(text: str) -> list[float]:
     response_payload = json.loads(response["body"].read())
     if not isinstance(response_payload, dict):
         raise ValueError("Bedrock response body must decode to a JSON object.")
-    return _coerce_embedding(response_payload)
+    embedding = _coerce_embedding(response_payload)
+    _write_cached_embedding(cache_key, embedding)
+    return embedding
 
 
 async def aembed_text(text: str) -> list[float]:
@@ -100,8 +165,42 @@ def embed_chunk_manifest(chunk_manifest_path: Path, output_dir: Path | None = No
 
 
 async def aembed_chunk_manifest(chunk_manifest_path: Path, output_dir: Path | None = None) -> Path:
-    """Embed one chunk manifest without blocking the event loop."""
-    return await asyncio.to_thread(embed_chunk_manifest, chunk_manifest_path, output_dir)
+    """Embed one chunk manifest concurrently using task scheduling plus threaded Bedrock calls."""
+    payload = _load_chunk_manifest(chunk_manifest_path)
+    destination_dir = output_dir or _resolve_path(settings.embedding.output_dir)
+    destination_dir.mkdir(parents=True, exist_ok=True)
+
+    semaphore = asyncio.Semaphore(settings.embedding.max_concurrency)
+    chunk_entries = [
+        chunk for chunk in payload.get("chunks", []) if isinstance(chunk, dict) and isinstance(chunk.get("content", ""), str)
+    ]
+
+    async def _embed_one(chunk: dict) -> tuple[dict, list[float]]:
+        """Embed one chunk while respecting the configured concurrency limit."""
+        async with semaphore:
+            vector = await aembed_text(chunk["content"])
+        return chunk, vector
+
+    tasks = [asyncio.create_task(_embed_one(chunk)) for chunk in chunk_entries]
+    embedded_results = await asyncio.gather(*tasks)
+
+    embedded_chunks = []
+    embedding_dimensions = 0
+    for chunk, vector in embedded_results:
+        embedding_dimensions = len(vector)
+        embedded_chunks.append(_build_embedded_chunk(chunk, vector))
+
+    output_payload = dict(payload)
+    output_payload["embedding_provider"] = settings.embedding.provider
+    output_payload["embedding_region"] = settings.embedding.region_name
+    output_payload["embedding_model"] = settings.embedding.model_id
+    output_payload["embedding_dimensions"] = embedding_dimensions
+    output_payload["embedded_at"] = datetime.now(timezone.utc).isoformat()
+    output_payload["chunks"] = embedded_chunks
+
+    output_path = _embedding_output_path(chunk_manifest_path, destination_dir)
+    output_path.write_text(json.dumps(output_payload, indent=2), encoding="utf-8")
+    return output_path
 
 
 def embed_configured_chunk_manifests() -> list[Path]:
@@ -130,6 +229,5 @@ async def aembed_configured_chunk_manifests() -> list[Path]:
         for chunk_manifest_path in sorted(input_dir.glob(settings.embedding.glob_pattern))
         if chunk_manifest_path.is_file()
     ]
-    return await asyncio.gather(
-        *(aembed_chunk_manifest(chunk_manifest_path, output_dir) for chunk_manifest_path in manifest_paths)
-    )
+    tasks = [asyncio.create_task(aembed_chunk_manifest(chunk_manifest_path, output_dir)) for chunk_manifest_path in manifest_paths]
+    return await asyncio.gather(*tasks)

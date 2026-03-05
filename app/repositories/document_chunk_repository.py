@@ -45,7 +45,43 @@ def _normalize_metadata_filters(metadata_filters: dict[str, str] | None) -> dict
 
 def resolve_document_chunk_search_strategy(metadata_filters: dict[str, str] | None) -> str:
     """Choose the retrieval strategy for the current filter shape."""
-    return "filtered_exact" if _normalize_metadata_filters(metadata_filters) else "ann"
+    if _normalize_metadata_filters(metadata_filters):
+        return "filtered_exact"
+    return settings.postgres.vector_index_type.strip().lower()
+
+
+def _vector_index_name() -> str:
+    """Return the stable vector index name used for retrieval chunk search."""
+    return "idx_doc_chunks_embedding"
+
+
+def _vector_index_sql(*, if_not_exists: bool) -> str:
+    """Build the configured pgvector index DDL for document chunk search."""
+    table_name = _qualified_chunk_table()
+    index_name = _vector_index_name()
+    guard = "IF NOT EXISTS " if if_not_exists else ""
+    index_type = settings.postgres.vector_index_type.strip().lower()
+
+    if index_type == "ivfflat":
+        return f"""
+            CREATE INDEX {guard}{index_name}
+            ON {table_name}
+            USING ivfflat (embedding vector_cosine_ops)
+            WITH (lists = {settings.postgres.ivfflat_lists});
+        """
+
+    if index_type == "hnsw":
+        return f"""
+            CREATE INDEX {guard}{index_name}
+            ON {table_name}
+            USING hnsw (embedding vector_cosine_ops)
+            WITH (m = {settings.postgres.hnsw_m}, ef_construction = {settings.postgres.hnsw_ef_construction});
+        """
+
+    raise ValueError(
+        f"Unsupported postgres.vector_index_type '{settings.postgres.vector_index_type}'. "
+        "Expected 'ivfflat' or 'hnsw'."
+    )
 
 
 def _search_document_chunks_ann(*, vector_value: str, top_k: int) -> list[dict]:
@@ -152,16 +188,26 @@ def ensure_document_chunk_table() -> None:
         CREATE INDEX IF NOT EXISTS idx_doc_chunks_metadata
         ON {table_name}
         USING GIN (metadata);
+    """
+    with pool.connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            cur.execute(_vector_index_sql(if_not_exists=True))
+        conn.commit()
 
-        CREATE INDEX IF NOT EXISTS idx_doc_chunks_embedding
-        ON {table_name}
-        USING ivfflat (embedding vector_cosine_ops)
-        WITH (lists = 100);
+
+def rebuild_document_chunk_vector_index() -> str:
+    """Drop and recreate the document chunk vector index using the configured ANN type."""
+    pool = get_postgres_pool()
+    sql = f"""
+        DROP INDEX IF EXISTS {settings.postgres.schema_name}.{_vector_index_name()};
+        {_vector_index_sql(if_not_exists=False)}
     """
     with pool.connection() as conn:
         with conn.cursor() as cur:
             cur.execute(sql)
         conn.commit()
+    return settings.postgres.vector_index_type.strip().lower()
 
 
 def upsert_document_chunk(chunk: dict) -> None:

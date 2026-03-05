@@ -13,4 +13,8 @@ postgres:
   memory_table: "long_term_memory"
   chunk_table: "document_chunks"
   embedding_dimensions: 1024
-  default_top_k: 8
+  default_top_k: 3
+  vector_index_type: "hnsw"
+  ivfflat_lists: 100
+  hnsw_m: 16
+  hnsw_ef_construction: 64

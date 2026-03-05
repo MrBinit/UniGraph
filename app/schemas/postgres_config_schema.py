@@ -17,3 +17,7 @@ class PostgresConfig(BaseModel):
     chunk_table: str = "document_chunks"
     embedding_dimensions: int = Field(default=1536, ge=1, le=16384)
     default_top_k: int = Field(default=8, ge=1, le=100)
+    vector_index_type: str = "hnsw"
+    ivfflat_lists: int = Field(default=100, ge=1, le=65535)
+    hnsw_m: int = Field(default=16, ge=2, le=100)
+    hnsw_ef_construction: int = Field(default=64, ge=4, le=1000)
