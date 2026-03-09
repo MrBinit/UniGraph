@@ -5,7 +5,8 @@ middleware:
   rate_limit_window_seconds: 60
   enable_distributed_rate_limit: true
   distributed_rate_limit_prefix: "ratelimit"
-  trusted_proxy_cidrs: []
+  trusted_proxy_cidrs:
+    - "172.31.0.0/16"
   enable_distributed_backpressure: true
   distributed_backpressure_key: "backpressure:inflight"
   distributed_backpressure_lease_seconds: 45

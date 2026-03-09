@@ -1,13 +1,15 @@
+import json
+import logging
 import os
 import yaml
 from functools import lru_cache
 from pathlib import Path
-from dotenv import load_dotenv
+import boto3
 
 from app.core.paths import APP_CONFIG_DIR
 from app.schemas.settings_schema import Settings
 
-load_dotenv()
+logger = logging.getLogger(__name__)
 
 
 def _load_yaml_file(file_path: Path) -> dict:
@@ -17,6 +19,54 @@ def _load_yaml_file(file_path: Path) -> dict:
     if not isinstance(data, dict):
         raise ValueError(f"YAML file must contain a mapping at top-level: {file_path}")
     return data
+
+
+def _load_aws_secrets_manager_env():
+    """Load environment variables from one AWS Secrets Manager JSON secret."""
+    secret_id = os.getenv("AWS_SECRETS_MANAGER_SECRET_ID", "").strip()
+    if not secret_id:
+        return
+
+    region = (
+        os.getenv("AWS_SECRETS_MANAGER_REGION", "").strip()
+        or os.getenv("AWS_REGION", "").strip()
+        or os.getenv("AWS_DEFAULT_REGION", "").strip()
+    )
+    client_kwargs = {"region_name": region} if region else {}
+
+    try:
+        client = boto3.client("secretsmanager", **client_kwargs)
+        response = client.get_secret_value(SecretId=secret_id)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to load AWS Secrets Manager secret '{secret_id}'. {exc}"
+        ) from exc
+
+    secret_string = response.get("SecretString", "")
+    if not isinstance(secret_string, str) or not secret_string.strip():
+        raise RuntimeError(f"AWS secret '{secret_id}' is empty or not a SecretString payload.")
+
+    try:
+        payload = json.loads(secret_string)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"AWS secret '{secret_id}' is not valid JSON. {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"AWS secret '{secret_id}' must be a JSON object.")
+
+    loaded_keys = 0
+    for key, value in payload.items():
+        if not isinstance(key, str) or not key.strip() or value is None:
+            continue
+        key = key.strip()
+        existing = os.getenv(key)
+        if existing is not None and existing != "":
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            os.environ[key] = str(value)
+            loaded_keys += 1
+
+    logger.info("AWSSecretLoaded | secret_id=%s | loaded_keys=%s", secret_id, loaded_keys)
 
 
 def _apply_env_overrides(data: dict) -> dict:
@@ -139,6 +189,7 @@ def get_settings() -> Settings:
     for config_file in config_files:
         data.update(_load_yaml_file(config_file))
 
+    _load_aws_secrets_manager_env()
     data = _apply_env_overrides(data)
     return Settings(**data)
 

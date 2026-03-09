@@ -1,21 +1,21 @@
 redis:
   app:
-    host: "localhost"
+    host: "ai-redis-cache-vho1b2.serverless.use1.cache.amazonaws.com"
     port: 6379
     db: 0
     username: ""
     password: ""
-    tls: false
+    tls: true
     ssl_cert_reqs: "required"
-    ssl_ca_certs: ""
+    ssl_ca_certs: "/etc/ssl/certs/ca-certificates.crt"
     namespace: "app"
   worker:
-    host: "localhost"
+    host: "ai-redis-cache-vho1b2.serverless.use1.cache.amazonaws.com"
     port: 6379
     db: 0
     username: ""
     password: ""
-    tls: false
+    tls: true
     ssl_cert_reqs: "required"
-    ssl_ca_certs: ""
+    ssl_ca_certs: "/etc/ssl/certs/ca-certificates.crt"
     namespace: "worker"

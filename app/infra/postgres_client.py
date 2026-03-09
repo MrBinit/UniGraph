@@ -1,9 +1,6 @@
 import os
 from urllib.parse import quote_plus
-from dotenv import load_dotenv
 from app.core.config import get_settings
-
-load_dotenv()
 
 settings = get_settings()
 _POOL = None

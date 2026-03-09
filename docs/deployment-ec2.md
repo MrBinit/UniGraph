@@ -46,70 +46,25 @@ Docker builds use `requirements-prod.txt` only.
 
 ## 3) Required Environment Variables
 
-Create `.env` in project root:
+This deployment flow does not rely on `.env` files. Export runtime variables in shell.
 
 ```bash
-# OpenAI
-AZURE_OPENAI_API_KEY=...
-AZURE_OPENAI_ENDPOINT=https://<your-azure-openai-endpoint>/
-AZURE_OPENAI_API_VERSION=2024-12-01-preview
-AZURE_OPENAI_PRIMARY_DEPLOYMENT=gpt-5.2-chat
-AZURE_OPENAI_FALLBACK_DEPLOYMENT=gpt-4o-mini
+# Runtime process count (optional, defaults to 2)
+export API_WORKERS=2
 
-# App runtime
-APP_DOCS_ENABLED=false
-API_WORKERS=2
-APP_METRICS_JSON_ENABLED=true
-APP_METRICS_JSON_DIR=data/metrics
-
-# Postgres
-POSTGRES_ENABLED=true
-POSTGRES_HOST=<rds-endpoint>
-POSTGRES_PORT=5432
-POSTGRES_DATABASE=unigraph
-POSTGRES_USERNAME=unigraph
-POSTGRES_PASSWORD=<postgres-password>
-POSTGRES_SSL_MODE=require
-
-# Redis app role
-REDIS_APP_HOST=<elasticache-endpoint>
-REDIS_APP_PORT=6379
-REDIS_APP_DB=0
-REDIS_APP_USERNAME=
-REDIS_APP_PASSWORD=
-REDIS_APP_TLS=true
-REDIS_APP_SSL_CERT_REQS=required
-REDIS_APP_SSL_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
-
-# Redis worker role
-REDIS_WORKER_HOST=<elasticache-endpoint>
-REDIS_WORKER_PORT=6379
-REDIS_WORKER_DB=0
-REDIS_WORKER_USERNAME=
-REDIS_WORKER_PASSWORD=
-REDIS_WORKER_TLS=true
-REDIS_WORKER_SSL_CERT_REQS=required
-REDIS_WORKER_SSL_CA_CERTS=/etc/ssl/certs/ca-certificates.crt
-
-# Security (required)
-SECURITY_AUTH_ENABLED=true
-SECURITY_JWT_SECRET=<long-random-secret-at-least-32-chars>
-SECURITY_JWT_ISSUER=ai-system
-SECURITY_JWT_EXP_MINUTES=60
-MEMORY_ENCRYPTION_KEY=<separate-long-random-secret-at-least-32-chars>
-
-# Distributed middleware (recommended)
-MIDDLEWARE_ENABLE_DISTRIBUTED_RATE_LIMIT=true
-MIDDLEWARE_DISTRIBUTED_RATE_LIMIT_PREFIX=ratelimit
-MIDDLEWARE_ENABLE_DISTRIBUTED_BACKPRESSURE=true
-MIDDLEWARE_DISTRIBUTED_BACKPRESSURE_KEY=backpressure:inflight
-MIDDLEWARE_DISTRIBUTED_BACKPRESSURE_LEASE_SECONDS=45
-MIDDLEWARE_TRUSTED_PROXY_CIDRS=172.31.0.0/16
-
-# Summary queue recovery
-MEMORY_SUMMARY_QUEUE_CLAIM_IDLE_MS=60000
-MEMORY_SUMMARY_QUEUE_CLAIM_BATCH_SIZE=50
+# Secrets Manager source for sensitive keys
+export AWS_SECRETS_MANAGER_SECRET_ID=unigraph/prod/app
+export AWS_SECRETS_MANAGER_REGION=us-east-1
 ```
+
+Secrets Manager option:
+
+- Sensitive keys are loaded from AWS Secrets Manager.
+- Set:
+  - `AWS_SECRETS_MANAGER_SECRET_ID=unigraph/prod/app`
+  - `AWS_SECRETS_MANAGER_REGION=us-east-1` (optional if region is already configured)
+- Secret value must be JSON object keys matching expected env names (for example `AZURE_OPENAI_API_KEY`, `POSTGRES_PASSWORD`, `SECURITY_JWT_SECRET`, `MEMORY_ENCRYPTION_KEY`).
+- App startup loads that secret once and maps keys into environment only when those env vars are not already set.
 
 Metrics JSON notes:
 
@@ -125,18 +80,12 @@ Proxy trust note:
 - set `MIDDLEWARE_TRUSTED_PROXY_CIDRS` only to known proxy/load-balancer CIDRs
 - if unset, `X-Forwarded-For` is ignored to prevent spoofing
 
-Lock down file permissions:
-
-```bash
-chmod 600 .env
-```
-
 ## 4) Pre-Deploy Validation
 
 Validate Compose and merged runtime config:
 
 ```bash
-docker compose config
+docker compose -f docker-compose.yml config
 ```
 
 ## 5) Deploy
@@ -144,13 +93,13 @@ docker compose config
 Build and start core services:
 
 ```bash
-docker compose up -d --build api worker
+docker compose -f docker-compose.yml up -d --build api worker
 ```
 
 Tail logs:
 
 ```bash
-docker compose logs -f api worker
+docker compose -f docker-compose.yml logs -f api worker
 ```
 
 ## 6) Scaling Guidance
@@ -162,7 +111,7 @@ Single EC2 host API scaling (vertical process scaling):
 Worker scaling (horizontal on same host):
 
 ```bash
-docker compose up -d --build --scale worker=2
+docker compose -f docker-compose.yml up -d --build --scale worker=2
 ```
 
 API horizontal scaling:
@@ -187,7 +136,7 @@ Expected response:
 Redis connectivity from API container:
 
 ```bash
-docker compose exec api python -c "from app.infra.redis_client import app_redis_client; print(app_redis_client.ping())"
+docker compose -f docker-compose.yml exec api python -c "from app.infra.redis_client import app_redis_client; print(app_redis_client.ping())"
 ```
 
 Expected output: `True`
@@ -197,7 +146,7 @@ Expected output: `True`
 - `APP_DOCS_ENABLED=false` in production
 - `SECURITY_JWT_SECRET` set to strong random value
 - `MEMORY_ENCRYPTION_KEY` set and different from JWT secret
-- `.env` not committed and permissions set to `600`
+- no plaintext secrets in repo or compose YAML
 - security groups restrict:
   - inbound `8000` to ALB or trusted CIDR only
   - Redis/Postgres access only from app nodes
@@ -230,12 +179,12 @@ APP_DOCS_ENABLED=true
 If deployment is unhealthy:
 
 ```bash
-docker compose logs --tail 200 api worker
-docker compose down
+docker compose -f docker-compose.yml logs --tail 200 api worker
+docker compose -f docker-compose.yml down
 ```
 
 Revert to previous version and redeploy:
 
 ```bash
-docker compose up -d --build api worker
+docker compose -f docker-compose.yml up -d --build api worker
 ```

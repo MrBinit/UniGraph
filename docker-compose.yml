@@ -6,16 +6,16 @@ services:
     image: ai-system:latest
     init: true
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
       REDIS_RUNTIME_ROLE: app
       API_WORKERS: ${API_WORKERS:-2}
+      AWS_SECRETS_MANAGER_SECRET_ID: ${AWS_SECRETS_MANAGER_SECRET_ID:-}
+      AWS_SECRETS_MANAGER_REGION: ${AWS_SECRETS_MANAGER_REGION:-}
     ports:
       - "${API_PORT:-8000}:8000"
     volumes:
       - ./data/metrics:/app/data/metrics
-    command: ["sh", "-c", "python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${API_WORKERS}"]
+    command: ["sh", "-c", "python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers $${API_WORKERS}"]
     healthcheck:
       test:
         [
@@ -35,10 +35,10 @@ services:
     image: ai-system:latest
     init: true
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
       REDIS_RUNTIME_ROLE: worker
+      AWS_SECRETS_MANAGER_SECRET_ID: ${AWS_SECRETS_MANAGER_SECRET_ID:-}
+      AWS_SECRETS_MANAGER_REGION: ${AWS_SECRETS_MANAGER_REGION:-}
     command: ["python", "-m", "app.scripts.summary_worker"]
     healthcheck:
       test:
