@@ -13,7 +13,7 @@ concurrency:
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
@@ -22,6 +22,12 @@ jobs:
       POSTGRES_PASSWORD: "ci_pg_password"
       AZURE_OPENAI_API_KEY: "ci_dummy_key"
       MIDDLEWARE_ENABLE_TIMEOUT: "false"
+      MIDDLEWARE_ENABLE_DISTRIBUTED_RATE_LIMIT: "false"
+      MIDDLEWARE_ENABLE_DISTRIBUTED_BACKPRESSURE: "false"
+      AWS_EC2_METADATA_DISABLED: "true"
+      AWS_ACCESS_KEY_ID: "ci_dummy_access_key"
+      AWS_SECRET_ACCESS_KEY: "ci_dummy_secret_key"
+      AWS_DEFAULT_REGION: "us-east-1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,6 +45,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
+          pip install pytest-xdist
 
       - name: Shell syntax check
         run: |
@@ -62,4 +69,4 @@ jobs:
         run: flake8 --max-line-length=100 --extend-ignore=E203,W503,E402,E501 app tests
 
       - name: Pytest
-        run: pytest -q
+        run: pytest -q -n auto --dist=worksteal --durations=25
