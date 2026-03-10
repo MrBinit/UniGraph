@@ -11,7 +11,7 @@ Verified runtime order (`app/services/llm_service.py`):
 -> `Long-Term Retrieval (Bedrock embedding + pgvector top_k=2)`
 -> `LLM Message Assembly (chat prompt + retrieved context + short-term context)`
 -> `Context Guardrails`
--> `LLM Call (Azure OpenAI primary, fallback on failure)`
+-> `LLM Call (AWS Bedrock primary, fallback on failure)`
 -> `Output Guardrails`
 -> `Short-Term Memory Update`
 -> `Response Cache Write`
@@ -25,14 +25,16 @@ Memory-first view:
 - Domain: AI backend for university/research discovery.
 - Chunking: Recursive markdown chunking with semantic separators and overlap.
 - Embeddings: Amazon Bedrock Titan (`amazon.titan-embed-text-v2:0`, 1024 dims).
-- Generation: Azure OpenAI `gpt-5.2-chat` (primary), `gpt-4o-mini` (fallback).
+- Generation: AWS Bedrock Anthropic profiles:
+  - primary: `us.anthropic.claude-3-5-sonnet-20240620-v1:0`
+  - fallback: `us.anthropic.claude-3-haiku-20240307-v1:0`
 - Long-term memory: PostgreSQL + pgvector (`document_chunks`), HNSW default.
 - Short-term memory: Redis (encrypted payloads, TTL, recent-window + summary strategy).
 - Queue: Redis Streams consumer group for async summary compaction.
 - Caching:
   - `app:cache:chat:{user_id}:{sanitized_prompt}`
   - embedding cache
-- Cross-cloud path: retrieval embedding runs on AWS Bedrock + generation runs on Azure OpenAI.
+- Current model path: retrieval embedding + generation both run on AWS Bedrock.
 
 ## 3) DynamoDB Metrics Storage (AWS)
 Request and aggregate metrics are persisted to DynamoDB in addition to JSON files.
@@ -74,22 +76,26 @@ Per-request top-level attributes include:
 
 ## 7) Performance Snapshot
 
-### A) Production multi-request snapshot (2026-03-10 UTC, n=13)
-- Total requests: 13
-- Success: 12
+### A) Production aggregate snapshot (2026-03-10 UTC, n=20)
+- Total requests: 20
+- Success: 13
 - Blocked input: 1
-- Avg overall latency: 16,216 ms
-- Avg LLM latency: 17,392 ms
-- Avg short-term memory latency: 10.8 ms
-- Avg long-term memory latency: 116.8 ms
-- Avg total tokens/request (with usage): 2,947
+- Model error: 6 (during Bedrock IAM/access rollout)
+- Avg overall latency: 10,757.6 ms
+- Avg LLM latency: 11,175.3 ms
+- Avg short-term memory latency: 7.9 ms
+- Avg long-term memory latency: 105.8 ms
+- Avg total tokens/request (with usage): 2,760.9
 
-### B) Latest local post-optimization sample (2026-03-10 UTC, n=1)
-- Overall latency: 28,046 ms
-- LLM latency: 21,397 ms
-- Long-term retrieval latency: 6,610 ms
-- Short-term memory latency: 6 ms
-- Memory update latency: 10 ms
+### B) Latest successful Bedrock request (2026-03-10 UTC)
+- Overall latency: 3,159 ms
+- LLM latency: 3,130 ms
+- Long-term retrieval latency: 6 ms
+- Short-term memory latency: 2 ms
+- Memory update latency: 8 ms
 - Evaluation trace latency in request path: 0 ms (background persistence active)
 
-Note: The local sample is only one request and should be treated as a smoke baseline, not a statistical benchmark.
+### C) Migration impact
+- Generation was previously run on Azure OpenAI (explored first), and was shifted to AWS Bedrock to address high response latency.
+- After migration and latency tuning, successful request latency dropped sharply versus earlier baseline runs (for example, previous successful LLM latencies in this project were often in the ~18-30s range; latest successful Bedrock sample is ~3.1s).
+- Current remaining risk is access/IAM rollout stability, not pipeline stage latency.
