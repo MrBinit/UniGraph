@@ -224,7 +224,9 @@ def _format_retrieval_context(retrieval_result: dict) -> dict | None:
     if not isinstance(results, list) or not results:
         return None
 
-    lines = ["Retrieved context (use only if relevant):"]
+    lines = [
+        "Retrieved long-term knowledge. Use this only when relevant to the user's request.",
+    ]
     seen_chunks: set[str] = set()
     used_results = 0
     for result in results:

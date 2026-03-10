@@ -1,4 +1,4 @@
-# UniGraph System Overview AI system design
+# UniGraph System Overview
 
 ## 1) End-to-End Request Flow
 Verified runtime order (`app/services/llm_service.py`):
