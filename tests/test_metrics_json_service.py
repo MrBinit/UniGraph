@@ -54,6 +54,8 @@ def test_append_chat_metrics_json_writes_request_and_aggregate(tmp_path, monkeyp
     assert aggregate["outcomes"]["success"] == 1
     assert aggregate["latency_ms"]["overall"]["count"] == 1
     assert aggregate["latency_ms"]["overall"]["average"] == 120.0
+    assert aggregate["latency_ms"]["overall"]["p95"] == 120.0
+    assert aggregate["latency_ms"]["overall"]["p99"] == 120.0
     assert aggregate["quality"]["hallucination_proxy"]["average"] == 0.2
     assert aggregate["token_usage"]["requests_with_usage"] == 1
     assert aggregate["token_usage"]["total_tokens_total"] == 30

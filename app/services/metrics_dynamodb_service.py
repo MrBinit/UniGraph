@@ -1,9 +1,19 @@
+"""DynamoDB persistence for chat request metrics and rolling aggregate snapshots.
+
+This module stores:
+1) one request-level item per chat call in the configured requests table, and
+2) a singleton aggregate snapshot item (`id=global`) in the configured aggregate table.
+
+The request item includes selected top-level attributes for easy querying
+(`session_id`, `outcome`, `latency_overall_ms`, `retrieval_strategy`, token usage)
+plus a full-fidelity `record_json` payload.
+"""
+
 import json
 import logging
 import os
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
-
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -11,15 +21,18 @@ logger = logging.getLogger(__name__)
 
 
 def _now_iso() -> str:
+    """Return the current UTC timestamp in ISO-8601 format."""
     return datetime.now(timezone.utc).isoformat()
 
 
 def _ttl_epoch_seconds(ttl_days: int) -> int:
+    """Convert TTL days to a DynamoDB-compatible epoch-seconds expiry value."""
     expires_at = datetime.now(timezone.utc) + timedelta(days=ttl_days)
     return int(expires_at.timestamp())
 
 
 def _region_name() -> str | None:
+    """Resolve AWS region from runtime environment variables."""
     region = (
         os.getenv("AWS_REGION", "").strip()
         or os.getenv("AWS_DEFAULT_REGION", "").strip()
@@ -30,6 +43,7 @@ def _region_name() -> str | None:
 
 @lru_cache()
 def _dynamodb_client():
+    """Create and cache a low-level DynamoDB client."""
     try:
         import boto3
     except ImportError as exc:  # pragma: no cover
@@ -39,6 +53,7 @@ def _dynamodb_client():
 
 
 def _int_str(value) -> str:
+    """Safely coerce any numeric-like value to DynamoDB numeric-string format."""
     try:
         return str(int(value))
     except (TypeError, ValueError):
@@ -46,6 +61,7 @@ def _int_str(value) -> str:
 
 
 def _float_str(value) -> str:
+    """Safely coerce any numeric-like value to floating numeric-string format."""
     try:
         return str(float(value))
     except (TypeError, ValueError):
@@ -53,6 +69,7 @@ def _float_str(value) -> str:
 
 
 def _persist_request_record(record: dict) -> None:
+    """Write one request-level metrics item to the configured requests table."""
     table_name = settings.app.metrics_dynamodb_requests_table.strip()
     if not table_name:
         return
@@ -62,18 +79,23 @@ def _persist_request_record(record: dict) -> None:
         return
 
     timings = record.get("timings_ms", {}) if isinstance(record.get("timings_ms"), dict) else {}
+    retrieval = record.get("retrieval", {}) if isinstance(record.get("retrieval"), dict) else {}
+    llm_usage = record.get("llm_usage", {}) if isinstance(record.get("llm_usage"), dict) else {}
     item = {
         "request_id": {"S": request_id},
         "timestamp": {"S": str(record.get("timestamp", _now_iso()))},
         "user_id": {"S": str(record.get("user_id", ""))},
         "session_id": {"S": str(record.get("session_id") or record.get("user_id", ""))},
         "outcome": {"S": str(record.get("outcome", "unknown"))},
+        "retrieval_strategy": {"S": str(retrieval.get("strategy", ""))},
         "query": {"S": str(record.get("question", ""))},
         "answer": {"S": str(record.get("answer", ""))},
         "latency_overall_ms": {"N": _int_str(timings.get("overall_response_ms"))},
         "latency_llm_ms": {"N": _int_str(timings.get("llm_response_ms"))},
         "latency_short_term_ms": {"N": _int_str(timings.get("short_term_memory_ms"))},
         "latency_long_term_ms": {"N": _int_str(timings.get("long_term_memory_ms"))},
+        "prompt_tokens": {"N": _int_str(llm_usage.get("prompt_tokens"))},
+        "total_tokens": {"N": _int_str(llm_usage.get("total_tokens"))},
         "record_json": {"S": json.dumps(record, ensure_ascii=False, default=str)},
     }
     if settings.app.metrics_dynamodb_ttl_days > 0:
@@ -83,6 +105,7 @@ def _persist_request_record(record: dict) -> None:
 
 
 def _persist_aggregate_snapshot(aggregate: dict | None) -> None:
+    """Write the latest aggregate metrics snapshot to the configured aggregate table."""
     table_name = settings.app.metrics_dynamodb_aggregate_table.strip()
     if not table_name or not isinstance(aggregate, dict):
         return
@@ -104,7 +127,11 @@ def _persist_aggregate_snapshot(aggregate: dict | None) -> None:
 
 
 def persist_chat_metrics_dynamodb(record: dict, aggregate: dict | None = None) -> None:
-    """Persist request and aggregate metrics payloads into DynamoDB tables."""
+    """Persist request-level and aggregate chat metrics into DynamoDB.
+
+    This function is best-effort by design: write errors are logged and swallowed
+    so observability failures do not block the chat response path.
+    """
     if not settings.app.metrics_dynamodb_enabled:
         return
 

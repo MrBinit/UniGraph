@@ -68,6 +68,7 @@ Current fields:
 - `max_ms`
 - `last_ms`
 - `last_outcome`
+- JSON aggregate also includes `p95` and `p99` for latency series
 
 Latency outcomes currently include:
 
@@ -117,3 +118,71 @@ Output files under `APP_METRICS_JSON_DIR`:
 
 - `chat_metrics_requests.jsonl`: one event per request (question, answer, latency breakdown, quality metrics, usage, outcome).
 - `chat_metrics_aggregate.json`: rolling totals and averages for latency, quality, outcomes, and token usage.
+
+Latency percentile notes:
+
+- `chat_metrics_aggregate.json` computes `p95` and `p99` for each latency series:
+  - `overall`
+  - `llm_response`
+  - `short_term_memory`
+  - `long_term_memory`
+  - `memory_update`
+  - `cache_read`
+  - `cache_write`
+  - `evaluation_trace`
+
+## DynamoDB Metrics Persistence
+
+When `APP_METRICS_DYNAMODB_ENABLED=true`, metrics are also persisted to DynamoDB.
+
+Tables:
+
+- requests table: `APP_METRICS_DYNAMODB_REQUESTS_TABLE`
+  - partition key: `request_id` (String)
+- aggregate table: `APP_METRICS_DYNAMODB_AGGREGATE_TABLE`
+  - partition key: `id` (String), uses singleton item `id=global`
+
+Request item storage model:
+
+- queryable top-level fields:
+  - `request_id`
+  - `timestamp`
+  - `user_id`
+  - `session_id`
+  - `outcome`
+  - `retrieval_strategy`
+  - `latency_overall_ms`
+  - `prompt_tokens`
+  - `total_tokens`
+- full payload:
+  - `record_json` (entire metrics record as JSON string)
+
+Aggregate item storage model:
+
+- queryable top-level fields:
+  - `id`
+  - `updated_at`
+  - `total_requests`
+  - `overall_avg_latency_ms`
+- full payload:
+  - `aggregate_json` (entire aggregate snapshot as JSON string)
+
+TTL behavior:
+
+- if `APP_METRICS_DYNAMODB_TTL_DAYS > 0`, items include `expires_at` (epoch seconds)
+- enable DynamoDB TTL on attribute `expires_at` in both tables
+
+Verification examples:
+
+```bash
+aws dynamodb scan \
+  --region us-east-1 \
+  --table-name unigraph-chat-metrics-requests \
+  --projection-expression "request_id,timestamp,outcome,session_id,latency_overall_ms,retrieval_strategy,prompt_tokens,total_tokens" \
+  --max-items 5
+
+aws dynamodb get-item \
+  --region us-east-1 \
+  --table-name unigraph-chat-metrics-aggregate \
+  --key '{"id":{"S":"global"}}'
+```

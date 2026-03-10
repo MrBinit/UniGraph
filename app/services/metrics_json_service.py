@@ -1,5 +1,6 @@
 import json
 import threading
+import math
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -62,6 +63,8 @@ def _series_template() -> dict:
         "total": 0.0,
         "average": 0.0,
         "max": 0.0,
+        "p95": 0.0,
+        "p99": 0.0,
     }
 
 
@@ -125,6 +128,53 @@ def _update_series(series: dict, value) -> None:
     series["total"] = float(series.get("total", 0.0)) + numeric
     series["average"] = round(series["total"] / max(1, series["count"]), 3)
     series["max"] = round(max(float(series.get("max", 0.0)), numeric), 3)
+
+
+def _percentile(values: list[float], p: int) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    rank = max(1, math.ceil((p / 100) * len(ordered)))
+    return float(ordered[rank - 1])
+
+
+def _refresh_latency_percentiles(aggregate: dict) -> None:
+    series_to_timing_key = {
+        "overall": "overall_response_ms",
+        "llm_response": "llm_response_ms",
+        "short_term_memory": "short_term_memory_ms",
+        "long_term_memory": "long_term_memory_ms",
+        "memory_update": "memory_update_ms",
+        "cache_read": "cache_read_ms",
+        "cache_write": "cache_write_ms",
+        "evaluation_trace": "evaluation_trace_ms",
+    }
+
+    requests_path = _requests_jsonl_path()
+    samples: dict[str, list[float]] = {series: [] for series in series_to_timing_key}
+    if requests_path.exists():
+        with open(requests_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    request = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                timings = request.get("timings_ms", {})
+                if not isinstance(timings, dict):
+                    continue
+                for series_name, timing_key in series_to_timing_key.items():
+                    value = _to_float(timings.get(timing_key))
+                    if value is not None:
+                        samples[series_name].append(value)
+
+    latency = aggregate.setdefault("latency_ms", {})
+    for series_name, series_samples in samples.items():
+        series = latency.setdefault(series_name, _series_template())
+        series["p95"] = round(_percentile(series_samples, 95), 3)
+        series["p99"] = round(_percentile(series_samples, 99), 3)
 
 
 def _load_aggregate(path: Path) -> dict:
@@ -264,6 +314,7 @@ def append_chat_metrics_json(record: dict) -> None:
         with _aggregate_lock():
             aggregate = _load_aggregate(aggregate_path)
             aggregate = _update_aggregate_payload(aggregate, normalized)
+            _refresh_latency_percentiles(aggregate)
             _save_aggregate(aggregate_path, aggregate)
 
     persist_chat_metrics_dynamodb(normalized, aggregate)

@@ -1,11 +1,11 @@
 memory:
-  max_tokens: 4000
-  summary_trigger: 3000
+  max_tokens: 3200
+  summary_trigger: 2200
   summary_ratio: 0.7
   redis_ttl_seconds: 3600
-  default_soft_token_budget: 2800
-  default_hard_token_budget: 3600
-  min_recent_messages_to_keep: 4
+  default_soft_token_budget: 1800
+  default_hard_token_budget: 2600
+  min_recent_messages_to_keep: 3
   summary_quality_max_ratio: 0.6
   user_token_budgets: {}
   summary_queue_stream_key: "memory:summary:jobs"

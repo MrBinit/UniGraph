@@ -12,8 +12,11 @@ from app.middlewares.rate_limit import RateLimitMiddleware
 from app.middlewares.request_logging import RequestLoggingMiddleware
 from app.middlewares.route_matching import RouteMatchingMiddleware
 from app.middlewares.timeout import TimeoutMiddleware
+from app.infra.postgres_client import get_postgres_pool
+from app.infra.redis_client import app_redis_client
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 def _configure_logging():
@@ -40,6 +43,25 @@ def create_app() -> FastAPI:
     @app.get("/healthz", include_in_schema=False)
     async def healthz():
         return {"status": "ok"}
+
+    @app.on_event("startup")
+    async def warm_backends():
+        """Warm backend connections during startup to reduce first-request latency."""
+        try:
+            app_redis_client.ping()
+            logger.info("StartupWarmup | redis=ok")
+        except Exception as exc:
+            logger.warning("StartupWarmup | redis=failed | error=%s", exc)
+
+        if settings.postgres.enabled:
+            try:
+                pool = get_postgres_pool()
+                with pool.connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("SELECT 1")
+                logger.info("StartupWarmup | postgres=ok")
+            except Exception as exc:
+                logger.warning("StartupWarmup | postgres=failed | error=%s", exc)
 
     if settings.middleware.enable_route_matching:
         app.add_middleware(RouteMatchingMiddleware)

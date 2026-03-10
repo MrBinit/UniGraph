@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from typing import AsyncIterator
 from uuid import uuid4
 
 from redis.exceptions import RedisError
@@ -25,6 +26,11 @@ prompts = get_prompts()
 logger = logging.getLogger(__name__)
 
 SEMAPHORE = asyncio.Semaphore(settings.azure_openai.max_concurrency)
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+_RETRIEVAL_QUERY_MAX_CHARS = 900
+_RETRIEVAL_CONTEXT_MAX_CHARS = 1500
+_RETRIEVAL_CHUNK_MAX_CHARS = 360
+_RETRIEVAL_MAX_PROMPT_RESULTS = 2
 
 
 async def _redis_call(method, *args, **kwargs):
@@ -204,10 +210,12 @@ def _build_retrieval_query(messages: list[dict]) -> str:
             continue
         role = message.get("role")
         content = message.get("content")
-        if role not in {"system", "user"} or not isinstance(content, str) or not content.strip():
+        if role != "user" or not isinstance(content, str) or not content.strip():
             continue
         text_parts.append(content.strip())
-    return "\n\n".join(text_parts[-3:])
+    if not text_parts:
+        return ""
+    return "\n\n".join(text_parts[-2:])[:_RETRIEVAL_QUERY_MAX_CHARS].strip()
 
 
 def _format_retrieval_context(retrieval_result: dict) -> dict | None:
@@ -216,16 +224,22 @@ def _format_retrieval_context(retrieval_result: dict) -> dict | None:
     if not isinstance(results, list) or not results:
         return None
 
-    lines = [
-        "Retrieved long-term knowledge. Use this only when relevant to the user's request.",
-    ]
-    for index, result in enumerate(results, start=1):
+    lines = ["Retrieved context (use only if relevant):"]
+    seen_chunks: set[str] = set()
+    used_results = 0
+    for result in results:
         if not isinstance(result, dict):
             continue
         content = result.get("content")
         metadata = result.get("metadata") or {}
         if not isinstance(content, str) or not content.strip():
             continue
+        dedupe_key = " ".join(content.lower().split())[:180]
+        if dedupe_key in seen_chunks:
+            continue
+        seen_chunks.add(dedupe_key)
+        used_results += 1
+
         label_parts = []
         if isinstance(metadata, dict):
             university = metadata.get("university")
@@ -234,12 +248,58 @@ def _format_retrieval_context(retrieval_result: dict) -> dict | None:
                 label_parts.append(university.strip())
             if isinstance(section_heading, str) and section_heading.strip():
                 label_parts.append(section_heading.strip())
-        label = " | ".join(label_parts) if label_parts else f"Result {index}"
-        lines.append(f"{index}. {label}: {content.strip()}")
+        label = " | ".join(label_parts) if label_parts else f"Result {used_results}"
+        compact_content = " ".join(content.split())[:_RETRIEVAL_CHUNK_MAX_CHARS]
+        lines.append(f"{used_results}. {label}: {compact_content}")
+        if used_results >= _RETRIEVAL_MAX_PROMPT_RESULTS:
+            break
 
     if len(lines) == 1:
         return None
-    return {"role": "system", "content": "\n".join(lines)}
+    joined = "\n".join(lines)
+    return {"role": "system", "content": joined[:_RETRIEVAL_CONTEXT_MAX_CHARS]}
+
+
+def _track_background_task(task: asyncio.Task, *, label: str) -> None:
+    """Track and log fire-and-forget tasks so they are not silently lost."""
+    _BACKGROUND_TASKS.add(task)
+
+    def _on_done(completed: asyncio.Task) -> None:
+        _BACKGROUND_TASKS.discard(completed)
+        try:
+            completed.result()
+        except Exception as exc:
+            logger.warning("%s failed in background. %s", label, exc)
+
+    task.add_done_callback(_on_done)
+
+
+async def _persist_evaluation_trace(
+    *,
+    user_id: str,
+    prompt: str,
+    answer: str,
+    retrieved_results: list[dict],
+    retrieval_strategy: str,
+    build_context_ms: int,
+    retrieval_ms: int,
+    model_ms: int,
+) -> None:
+    """Persist evaluation traces outside the request critical path."""
+    await asyncio.to_thread(
+        store_chat_trace,
+        user_id=user_id,
+        prompt=prompt,
+        answer=answer,
+        retrieved_results=retrieved_results,
+        retrieval_strategy=retrieval_strategy,
+        timings_ms={
+            "build_context": build_context_ms,
+            "retrieval": retrieval_ms,
+            "model": model_ms,
+        },
+        redis=redis_client,
+    )
 
 
 async def _call_primary(messages: list):
@@ -522,25 +582,22 @@ async def generate_response(user_id: str, user_prompt: str) -> str:
         cache_write_ms = _elapsed_ms(cache_write_started_at)
 
     evaluation_trace_started_at = time.perf_counter()
-    try:
-        await asyncio.to_thread(
-            store_chat_trace,
-            user_id=user_id,
-            prompt=user_prompt,
-            answer=result,
-            retrieved_results=retrieved_results,
-            retrieval_strategy=retrieval_strategy,
-            timings_ms={
-                "build_context": build_context_ms or 0,
-                "retrieval": retrieval_ms or 0,
-                "model": model_ms or 0,
-            },
-            redis=redis_client,
-        )
-    except Exception as exc:
-        logger.warning("Evaluation trace persistence failed. %s", exc)
-    finally:
-        evaluation_trace_ms = _elapsed_ms(evaluation_trace_started_at)
+    _track_background_task(
+        asyncio.create_task(
+            _persist_evaluation_trace(
+                user_id=user_id,
+                prompt=user_prompt,
+                answer=result,
+                retrieved_results=retrieved_results,
+                retrieval_strategy=retrieval_strategy,
+                build_context_ms=build_context_ms or 0,
+                retrieval_ms=retrieval_ms or 0,
+                model_ms=model_ms or 0,
+            )
+        ),
+        label="Evaluation trace persistence",
+    )
+    evaluation_trace_ms = _elapsed_ms(evaluation_trace_started_at)
 
     try:
         quality = generation_metrics(
@@ -599,3 +656,29 @@ async def generate_response(user_id: str, user_prompt: str) -> str:
     )
     await _record_latency_metrics(started_at, "success")
     return result
+
+
+async def generate_response_stream(
+    user_id: str,
+    user_prompt: str,
+    *,
+    chunk_size: int = 120,
+    chunk_delay_ms: int = 12,
+) -> AsyncIterator[str]:
+    """Yield a progressively growing answer string for Gradio streaming UX.
+
+    This streams the already-validated final answer text in chunks so guardrail,
+    memory, cache, and metrics behavior remains identical to `generate_response`.
+    """
+    result = await generate_response(user_id, user_prompt)
+    if not isinstance(result, str):
+        result = str(result)
+
+    size = max(1, int(chunk_size))
+    delay_seconds = max(0.0, float(chunk_delay_ms) / 1000.0)
+    assembled = ""
+    for start in range(0, len(result), size):
+        assembled += result[start : start + size]
+        yield assembled
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)

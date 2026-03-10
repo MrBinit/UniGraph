@@ -79,6 +79,46 @@ Metrics JSON notes:
   - `<dir>/chat_metrics_aggregate.json`
 - `docker-compose.prod.yml` mounts `./data/metrics:/app/data/metrics` so metrics are visible on host and survive container restarts/recreates.
 
+Metrics DynamoDB notes:
+
+- `APP_METRICS_DYNAMODB_ENABLED=true` enables DynamoDB metrics persistence.
+- required config keys:
+  - `APP_METRICS_DYNAMODB_REQUESTS_TABLE`
+  - `APP_METRICS_DYNAMODB_AGGREGATE_TABLE`
+  - `APP_METRICS_DYNAMODB_TTL_DAYS` (optional; set `0` to disable TTL stamping)
+- recommended table setup:
+  - requests table partition key: `request_id` (String)
+  - aggregate table partition key: `id` (String), singleton item `id=global`
+- enable DynamoDB TTL on `expires_at` when TTL days > 0.
+
+Required IAM permission for instance role:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowDynamoMetricsWrites",
+      "Effect": "Allow",
+      "Action": [
+        "dynamodb:PutItem"
+      ],
+      "Resource": [
+        "arn:aws:dynamodb:us-east-1:<account-id>:table/<requests-table>",
+        "arn:aws:dynamodb:us-east-1:<account-id>:table/<aggregate-table>"
+      ]
+    }
+  ]
+}
+```
+
+Gradio streaming notes:
+
+- Gradio response streaming is enabled by default via chunked progressive rendering.
+- optional tuning env vars:
+  - `GRADIO_STREAM_CHUNK_SIZE` (default `120`)
+  - `GRADIO_STREAM_CHUNK_DELAY_MS` (default `12`)
+
 Proxy trust note:
 
 - set `MIDDLEWARE_TRUSTED_PROXY_CIDRS` only to known proxy/load-balancer CIDRs

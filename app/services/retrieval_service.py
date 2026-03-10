@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 def retrieve_document_chunks(
     query: str,
     *,
-    top_k: int = 5,
+    top_k: int = 3,
     metadata_filters: dict[str, str] | None = None,
 ) -> dict:
     """Embed a query, run retrieval, and return results with latency breakdowns."""
@@ -62,7 +62,7 @@ def retrieve_document_chunks(
 async def aretrieve_document_chunks(
     query: str,
     *,
-    top_k: int = 5,
+    top_k: int = 3,
     metadata_filters: dict[str, str] | None = None,
 ) -> dict:
     """Run retrieval without blocking the event loop."""

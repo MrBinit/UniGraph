@@ -27,12 +27,12 @@ if command -v jq >/dev/null 2>&1; then
     total_requests,
     outcomes,
     latest_request,
-    overall_latency: .latency_ms.overall,
-    llm_latency: .latency_ms.llm_response,
-    short_term_memory_latency: .latency_ms.short_term_memory,
-    long_term_memory_latency: .latency_ms.long_term_memory,
-    cache_read_latency: .latency_ms.cache_read,
-    cache_write_latency: .latency_ms.cache_write,
+    overall_latency: (.latency_ms.overall | {count,total,average,max,p95,p99}),
+    llm_latency: (.latency_ms.llm_response | {count,total,average,max,p95,p99}),
+    short_term_memory_latency: (.latency_ms.short_term_memory | {count,total,average,max,p95,p99}),
+    long_term_memory_latency: (.latency_ms.long_term_memory | {count,total,average,max,p95,p99}),
+    cache_read_latency: (.latency_ms.cache_read | {count,total,average,max,p95,p99}),
+    cache_write_latency: (.latency_ms.cache_write | {count,total,average,max,p95,p99}),
     token_usage
   }' "${AGG_FILE}"
 else
