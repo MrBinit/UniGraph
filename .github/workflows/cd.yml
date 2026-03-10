@@ -134,11 +134,40 @@ jobs:
             aws ecr get-login-password --region "${AWS_REGION}" \
               | docker login --username AWS --password-stdin "${ECR_REGISTRY}"
 
+            # Avoid pull failures on small EC2 root volumes by pruning Docker when disk is low.
+            DISK_PATH="/var/lib/containerd"
+            if [[ ! -d "${DISK_PATH}" ]]; then
+              DISK_PATH="/var/lib/docker"
+            fi
+            if [[ ! -d "${DISK_PATH}" ]]; then
+              DISK_PATH="/var/lib"
+            fi
+
+            echo "Disk usage before deploy:"
+            df -h / "${DISK_PATH}" || true
+            docker system df || true
+
+            avail_mb="$(df -Pm "${DISK_PATH}" | awk 'NR==2 {print $4}')"
+            if [[ -n "${avail_mb}" ]] && [[ "${avail_mb}" -lt 6144 ]]; then
+              echo "Low disk detected (${avail_mb}MB free). Running Docker prune..."
+              docker container prune -f || true
+              docker image prune -af || true
+              docker builder prune -af || true
+              docker network prune -f || true
+            fi
+
+            avail_mb_after="$(df -Pm "${DISK_PATH}" | awk 'NR==2 {print $4}')"
+            echo "Available space after prune: ${avail_mb_after}MB"
+            if [[ -n "${avail_mb_after}" ]] && [[ "${avail_mb_after}" -lt 3072 ]]; then
+              echo "Insufficient free space for image pull (<3GB)."
+              exit 1
+            fi
+
             mkdir -p data/metrics
             chown "$(id -u):$(id -g)" data/metrics || true
             chmod 775 data/metrics || true
 
-            docker compose -f docker-compose.prod.yml --profile gradio pull api worker gradio
+            docker compose -f docker-compose.prod.yml --profile gradio pull api gradio
             docker compose -f docker-compose.prod.yml --profile gradio up -d api worker gradio
             docker compose -f docker-compose.prod.yml --profile gradio ps
 
