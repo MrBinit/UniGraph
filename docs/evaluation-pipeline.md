@@ -18,7 +18,8 @@ and an evidence-grounding support metric:
 -> `retrieval from Postgres/pgvector`
 -> `answer generation`
 -> `request metrics persisted to DynamoDB requests table (includes retrieval evidence snapshot)`
--> `offline evaluator worker scans new successful requests`
+-> `optional SQS evaluation event enqueue (success-only request_id)`
+-> `offline evaluator (queue worker by request_id OR scan worker)`
 -> `3 independent LLM judge calls (clarity, relevance, hallucination)`
 -> `evaluation item written to DynamoDB evaluations table by request_id`
 -> `daily/adhoc report computes p50/p95 + failure reasons + worst examples`
@@ -78,6 +79,7 @@ Judge prompts:
 Implementation:
 
 - `app/scripts/eval_dynamodb_worker.py`
+- `app/scripts/eval_queue_worker.py`
 - each metric is scored by a separate LLM judge call
 
 ## Scoring Logic
@@ -128,6 +130,18 @@ Failure reason rules:
 - background scheduler checks every `evaluation.schedule_interval_hours` (default 24)
 - executes only if new successful requests exist since last evaluated timestamp
 
+### Queue-driven (event mode)
+
+- set:
+  - `EVALUATION_QUEUE_ENABLED=true`
+  - `EVALUATION_QUEUE_URL=<sqs-url>`
+- run worker:
+  - `python -m app.scripts.eval_queue_worker`
+- behavior:
+  - successful requests publish one event keyed by `request_id`
+  - worker evaluates that request immediately and stores one eval row
+  - scan scheduler can remain enabled as safety net/backfill
+
 ## Reporting
 
 Report endpoint:
@@ -140,4 +154,3 @@ Report includes:
 - p50/p95 for evidence similarity
 - failure reason distribution
 - top low-score examples
-

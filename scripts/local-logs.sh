@@ -21,7 +21,10 @@ COMPOSE_ARGS=(
   -f docker-compose.yml
   -f docker-compose.local.yml
   --profile local-redis
+  --profile llm-async
+  --profile eval-queue
+  --profile metrics-queue
 )
 
-echo "[local-logs] Streaming api/worker/redis/gradio logs..."
-docker compose --env-file "${ENV_FILE}" "${COMPOSE_ARGS[@]}" logs -f api worker redis gradio
+echo "[local-logs] Streaming api/worker/llm-worker/eval-worker/metrics-worker/redis/gradio logs..."
+docker compose --env-file "${ENV_FILE}" "${COMPOSE_ARGS[@]}" logs -f api worker llm-worker eval-worker metrics-worker redis gradio

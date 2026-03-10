@@ -14,6 +14,7 @@ Files in this folder:
 - `redis.md`: Redis topology, namespaces, clients, key patterns, and queue usage.
 - `ops.md`: operational status endpoint and the metrics it exposes.
 - `evaluation-pipeline.md`: end-to-end offline evaluation architecture (evidence capture, judge prompts, scoring, storage, reports).
+- `async-chat-sqs.md`: async chat queue architecture (SQS enqueue, worker consumption, DynamoDB result store, APIs).
 - `system-overview.md`: concise end-to-end architecture, Bedrock-based generation/retrieval flow, security/scalability, and latest performance snapshot.
 - `strategy.md`: current architecture state and the recommended next build steps.
 

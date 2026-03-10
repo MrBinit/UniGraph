@@ -264,6 +264,38 @@ def _extract_retrieval_evidence(item: dict) -> list[dict]:
     return []
 
 
+def _normalize_request_for_eval(item: dict) -> dict | None:
+    if str(item.get("outcome", "")) != "success":
+        return None
+    if not str(item.get("question", "")).strip():
+        item["question"] = str(item.get("query", "")).strip()
+    item["retrieval_evidence"] = _extract_retrieval_evidence(item)
+    return item
+
+
+def _load_request_for_eval(request_id: str) -> dict | None:
+    requests_table = settings.app.metrics_dynamodb_requests_table.strip()
+    request_id = str(request_id).strip()
+    if not requests_table or not request_id:
+        return None
+
+    ddb = _dynamodb_client()
+    response = ddb.get_item(
+        TableName=requests_table,
+        Key={"request_id": {"S": request_id}},
+        ProjectionExpression=(
+            "request_id,#ts,user_id,session_id,outcome,question,query,answer,"
+            "retrieval_evidence_json,record_json"
+        ),
+        ExpressionAttributeNames={"#ts": "timestamp"},
+    )
+    raw = response.get("Item")
+    if not isinstance(raw, dict):
+        return None
+    item = _from_dynamo_item(raw)
+    return _normalize_request_for_eval(item)
+
+
 def _load_requests_for_eval(max_items: int, lookback_hours: int) -> list[dict]:
     requests_table = settings.app.metrics_dynamodb_requests_table.strip()
     if not requests_table:
@@ -291,8 +323,6 @@ def _load_requests_for_eval(max_items: int, lookback_hours: int) -> list[dict]:
     items = [_from_dynamo_item(item) for item in raw_items]
     filtered: list[dict] = []
     for item in items:
-        if str(item.get("outcome", "")) != "success":
-            continue
         ts = str(item.get("timestamp", ""))
         try:
             parsed_ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
@@ -300,10 +330,9 @@ def _load_requests_for_eval(max_items: int, lookback_hours: int) -> list[dict]:
             continue
         if parsed_ts < cutoff:
             continue
-        if not str(item.get("question", "")).strip():
-            item["question"] = str(item.get("query", "")).strip()
-        item["retrieval_evidence"] = _extract_retrieval_evidence(item)
-        filtered.append(item)
+        normalized = _normalize_request_for_eval(item)
+        if normalized:
+            filtered.append(normalized)
     return filtered
 
 
@@ -356,6 +385,50 @@ def _persist_eval(request_record: dict, judged: dict) -> None:
     if expires_at > 0:
         item["expires_at"] = {"N": str(expires_at)}
     _dynamodb_client().put_item(TableName=table, Item=item)
+
+
+async def run_request_eval(request_id: str) -> dict:
+    """Evaluate exactly one successful request and persist scores."""
+    request_id = str(request_id).strip()
+    if not settings.evaluation.enabled:
+        return {
+            "request_id": request_id,
+            "evaluated": False,
+            "skipped": True,
+            "reason": "evaluation disabled",
+        }
+    if not request_id:
+        return {
+            "request_id": request_id,
+            "evaluated": False,
+            "skipped": True,
+            "reason": "missing request_id",
+        }
+
+    request = _load_request_for_eval(request_id)
+    if not request:
+        return {
+            "request_id": request_id,
+            "evaluated": False,
+            "skipped": True,
+            "reason": "request not found or not successful",
+        }
+    if _eval_exists(request_id):
+        return {
+            "request_id": request_id,
+            "evaluated": False,
+            "skipped": True,
+            "reason": "already evaluated",
+        }
+
+    judged = await _evaluate_one(request)
+    _persist_eval(request, judged)
+    return {
+        "request_id": request_id,
+        "evaluated": True,
+        "skipped": False,
+        "reason": "ok",
+    }
 
 
 async def run(limit: int | None = None) -> dict:

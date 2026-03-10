@@ -7,10 +7,17 @@ from app.main import app
 
 
 def test_chat_endpoint_success(monkeypatch):
-    async def fake_generate_response(user_id: str, user_prompt: str) -> str:
-        return f"{user_id}:{user_prompt}"
+    def fake_enqueue_chat_job(*, user_id: str, prompt: str, session_id: str | None = None) -> dict:
+        assert user_id == "user-1"
+        assert prompt == "hello"
+        assert session_id == "user-1"
+        return {
+            "job_id": "job-sync-removed-1234",
+            "status": "queued",
+            "submitted_at": "2026-03-10T00:00:00+00:00",
+        }
 
-    monkeypatch.setattr(chat_api, "generate_response", fake_generate_response)
+    monkeypatch.setattr(chat_api, "enqueue_chat_job", fake_enqueue_chat_job)
 
     token = create_access_token(user_id="user-1", roles=["user"])
     client = TestClient(app)
@@ -20,8 +27,12 @@ def test_chat_endpoint_success(monkeypatch):
         headers={"Authorization": f"Bearer {token}"},
     )
 
-    assert response.status_code == 200
-    assert response.json() == {"response": "user-1:hello"}
+    assert response.status_code == 202
+    assert response.json() == {
+        "job_id": "job-sync-removed-1234",
+        "status": "queued",
+        "submitted_at": "2026-03-10T00:00:00+00:00",
+    }
 
 
 def test_chat_endpoint_requires_user_id():
@@ -50,6 +61,61 @@ def test_chat_endpoint_forbidden_for_different_user():
     response = client.post(
         "/api/v1/chat",
         json={"user_id": "user-b", "prompt": "hello"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 403
+
+
+def test_chat_async_enqueue_success(monkeypatch):
+    def fake_enqueue_chat_job(*, user_id: str, prompt: str, session_id: str | None = None) -> dict:
+        assert user_id == "user-1"
+        assert prompt == "hello async"
+        assert session_id == "user-1"
+        return {
+            "job_id": "job-12345678",
+            "status": "queued",
+            "submitted_at": "2026-03-10T00:00:00+00:00",
+        }
+
+    monkeypatch.setattr(chat_api, "enqueue_chat_job", fake_enqueue_chat_job)
+
+    token = create_access_token(user_id="user-1", roles=["user"])
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/chat",
+        json={"user_id": "user-1", "prompt": "hello async"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {
+        "job_id": "job-12345678",
+        "status": "queued",
+        "submitted_at": "2026-03-10T00:00:00+00:00",
+    }
+
+
+def test_chat_async_status_requires_owner(monkeypatch):
+    monkeypatch.setattr(
+        chat_api,
+        "get_chat_job",
+        lambda _job_id: {
+            "job_id": "job-abc",
+            "user_id": "user-b",
+            "session_id": "user-b",
+            "status": "processing",
+            "created_at": "2026-03-10T00:00:00+00:00",
+            "started_at": "2026-03-10T00:00:02+00:00",
+            "completed_at": "",
+            "answer": "",
+            "error": "",
+        },
+    )
+
+    token = create_access_token(user_id="user-a", roles=["user"])
+    client = TestClient(app)
+    response = client.get(
+        "/api/v1/chat/job-abc",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 403

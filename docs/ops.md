@@ -167,6 +167,16 @@ Aggregate item storage model:
 - full payload:
   - `aggregate_json` (entire aggregate snapshot as JSON string)
 
+Optional queue mode (recommended at higher throughput):
+
+- `METRICS_AGGREGATION_QUEUE_ENABLED=true`
+- `METRICS_AGGREGATION_QUEUE_URL=<sqs-url>`
+- run worker: `python -m app.scripts.metrics_aggregation_worker`
+- behavior:
+  - live request persists request row immediately
+  - aggregate sync is offloaded to SQS worker
+  - if queue publish fails, service falls back to inline aggregate write
+
 ## Offline Evaluation (Separate Table)
 
 Live request handling does not compute hallucination/clarity/relevance metrics.
@@ -204,6 +214,8 @@ Scripts:
   - `python -m app.scripts.eval_dynamodb_worker --limit 200`
 - daily report:
   - `python -m app.scripts.eval_daily_report --hours 24 --top-bad 10`
+- queue worker (per-request evaluation from SQS):
+  - `python -m app.scripts.eval_queue_worker`
 
 API endpoints (admin):
 
@@ -223,6 +235,14 @@ Scheduling behavior:
   - there are new successful request records after the latest evaluated timestamp
   - and the interval gate is reached
 - manual `force=true` always runs immediately
+
+Optional queue-driven evaluation mode:
+
+- `EVALUATION_QUEUE_ENABLED=true`
+- `EVALUATION_QUEUE_URL=<sqs-url>`
+- request metrics persistence publishes one eval event per successful request
+- worker consumes by `request_id` and writes into `evaluation.dynamodb_table`
+- scheduled scan path can remain enabled as periodic backfill/safety net
 
 Daily report output:
 

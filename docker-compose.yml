@@ -52,6 +52,53 @@ services:
       start_period: 30s
     stop_grace_period: 20s
 
+  llm-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-system:latest
+    init: true
+    restart: unless-stopped
+    profiles: ["llm-async"]
+    environment:
+      REDIS_RUNTIME_ROLE: app
+      AWS_SECRETS_MANAGER_SECRET_ID: ${AWS_SECRETS_MANAGER_SECRET_ID:-}
+      AWS_SECRETS_MANAGER_REGION: ${AWS_SECRETS_MANAGER_REGION:-}
+    command: ["python", "-m", "app.scripts.llm_async_worker"]
+    stop_grace_period: 20s
+
+  eval-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-system:latest
+    init: true
+    restart: unless-stopped
+    profiles: ["eval-queue"]
+    environment:
+      REDIS_RUNTIME_ROLE: app
+      AWS_SECRETS_MANAGER_SECRET_ID: ${AWS_SECRETS_MANAGER_SECRET_ID:-}
+      AWS_SECRETS_MANAGER_REGION: ${AWS_SECRETS_MANAGER_REGION:-}
+    command: ["python", "-m", "app.scripts.eval_queue_worker"]
+    stop_grace_period: 20s
+
+  metrics-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ai-system:latest
+    init: true
+    restart: unless-stopped
+    profiles: ["metrics-queue"]
+    environment:
+      REDIS_RUNTIME_ROLE: app
+      AWS_SECRETS_MANAGER_SECRET_ID: ${AWS_SECRETS_MANAGER_SECRET_ID:-}
+      AWS_SECRETS_MANAGER_REGION: ${AWS_SECRETS_MANAGER_REGION:-}
+    command: ["python", "-m", "app.scripts.metrics_aggregation_worker"]
+    volumes:
+      - ./data/metrics:/app/data/metrics
+    stop_grace_period: 20s
+
   redis:
     image: redis:7-alpine
     container_name: ai-system-redis

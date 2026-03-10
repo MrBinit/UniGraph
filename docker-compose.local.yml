@@ -60,6 +60,100 @@ services:
     volumes:
       - ${HOME}/.aws:/home/app/.aws:ro
 
+  llm-worker:
+    environment:
+      POSTGRES_ENABLED: "true"
+      REDIS_RUNTIME_ROLE: "app"
+      REDIS_APP_HOST: "redis"
+      REDIS_APP_PORT: "6379"
+      REDIS_APP_DB: "0"
+      REDIS_APP_USERNAME: ""
+      REDIS_APP_PASSWORD: ""
+      REDIS_APP_SSL_CA_CERTS: ""
+      REDIS_WORKER_HOST: "redis"
+      REDIS_WORKER_PORT: "6379"
+      REDIS_WORKER_DB: "0"
+      REDIS_WORKER_USERNAME: ""
+      REDIS_WORKER_PASSWORD: ""
+      REDIS_WORKER_SSL_CA_CERTS: ""
+      REDIS_APP_TLS: "false"
+      REDIS_APP_SSL_CERT_REQS: "none"
+      REDIS_WORKER_TLS: "false"
+      REDIS_WORKER_SSL_CERT_REQS: "none"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN:-}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
+      AWS_DEFAULT_REGION: "${AWS_DEFAULT_REGION:-us-east-1}"
+      AWS_SECRETS_MANAGER_SECRET_ID: "${AWS_SECRETS_MANAGER_SECRET_ID:-unigraph/prod/app}"
+      AWS_SECRETS_MANAGER_REGION: "${AWS_SECRETS_MANAGER_REGION:-us-east-1}"
+      AWS_SDK_LOAD_CONFIG: "1"
+    volumes:
+      - ${HOME}/.aws:/home/app/.aws:ro
+
+  eval-worker:
+    environment:
+      POSTGRES_ENABLED: "true"
+      REDIS_RUNTIME_ROLE: "app"
+      REDIS_APP_HOST: "redis"
+      REDIS_APP_PORT: "6379"
+      REDIS_APP_DB: "0"
+      REDIS_APP_USERNAME: ""
+      REDIS_APP_PASSWORD: ""
+      REDIS_APP_SSL_CA_CERTS: ""
+      REDIS_WORKER_HOST: "redis"
+      REDIS_WORKER_PORT: "6379"
+      REDIS_WORKER_DB: "0"
+      REDIS_WORKER_USERNAME: ""
+      REDIS_WORKER_PASSWORD: ""
+      REDIS_WORKER_SSL_CA_CERTS: ""
+      REDIS_APP_TLS: "false"
+      REDIS_APP_SSL_CERT_REQS: "none"
+      REDIS_WORKER_TLS: "false"
+      REDIS_WORKER_SSL_CERT_REQS: "none"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN:-}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
+      AWS_DEFAULT_REGION: "${AWS_DEFAULT_REGION:-us-east-1}"
+      AWS_SECRETS_MANAGER_SECRET_ID: "${AWS_SECRETS_MANAGER_SECRET_ID:-unigraph/prod/app}"
+      AWS_SECRETS_MANAGER_REGION: "${AWS_SECRETS_MANAGER_REGION:-us-east-1}"
+      AWS_SDK_LOAD_CONFIG: "1"
+    volumes:
+      - ${HOME}/.aws:/home/app/.aws:ro
+
+  metrics-worker:
+    environment:
+      POSTGRES_ENABLED: "true"
+      REDIS_RUNTIME_ROLE: "app"
+      REDIS_APP_HOST: "redis"
+      REDIS_APP_PORT: "6379"
+      REDIS_APP_DB: "0"
+      REDIS_APP_USERNAME: ""
+      REDIS_APP_PASSWORD: ""
+      REDIS_APP_SSL_CA_CERTS: ""
+      REDIS_WORKER_HOST: "redis"
+      REDIS_WORKER_PORT: "6379"
+      REDIS_WORKER_DB: "0"
+      REDIS_WORKER_USERNAME: ""
+      REDIS_WORKER_PASSWORD: ""
+      REDIS_WORKER_SSL_CA_CERTS: ""
+      REDIS_APP_TLS: "false"
+      REDIS_APP_SSL_CERT_REQS: "none"
+      REDIS_WORKER_TLS: "false"
+      REDIS_WORKER_SSL_CERT_REQS: "none"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:-}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:-}"
+      AWS_SESSION_TOKEN: "${AWS_SESSION_TOKEN:-}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
+      AWS_DEFAULT_REGION: "${AWS_DEFAULT_REGION:-us-east-1}"
+      AWS_SECRETS_MANAGER_SECRET_ID: "${AWS_SECRETS_MANAGER_SECRET_ID:-unigraph/prod/app}"
+      AWS_SECRETS_MANAGER_REGION: "${AWS_SECRETS_MANAGER_REGION:-us-east-1}"
+      AWS_SDK_LOAD_CONFIG: "1"
+    volumes:
+      - ./data/metrics:/app/data/metrics
+      - ${HOME}/.aws:/home/app/.aws:ro
+
   gradio:
     build:
       context: .

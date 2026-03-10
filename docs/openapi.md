@@ -22,17 +22,15 @@ All application routes are mounted under:
 
 ### `POST /api/v1/chat`
 
-Primary user-facing endpoint for scoped academic discovery requests.
+Primary async enqueue endpoint for high-concurrency chat architecture.
 
 Purpose:
 
 - Accept a user prompt
 - Enforce authentication and authorization
-- Apply input and context guardrails
-- Read short-term memory
-- Call the LLM
-- Update short-term memory
-- Queue async summarization when memory exceeds the threshold
+- Create an async job record
+- Push the job to SQS
+- Return `job_id` immediately
 
 Request body:
 
@@ -57,20 +55,47 @@ Response body:
 
 ```json
 {
-  "response": "..."
+  "job_id": "4d7a9b6d6a5b4cf7b3ef31e3f3468b0b",
+  "status": "queued",
+  "submitted_at": "2026-03-10T10:30:00+00:00"
 }
 ```
 
-Response validation:
+Status code:
 
-- `response`
-  - required
-  - length `1..12000`
+- `202 Accepted`
 
 Security:
 
 - Requires a bearer token unless `auth_enabled` is disabled
 - Caller can access only their own `user_id`, unless they have an admin role
+
+### `GET /api/v1/chat/{job_id}`
+
+Read async job status and final result.
+
+Response body (example):
+
+```json
+{
+  "job_id": "4d7a9b6d6a5b4cf7b3ef31e3f3468b0b",
+  "user_id": "user-1",
+  "session_id": "user-1",
+  "status": "completed",
+  "submitted_at": "2026-03-10T10:30:00+00:00",
+  "started_at": "2026-03-10T10:30:01+00:00",
+  "completed_at": "2026-03-10T10:30:04+00:00",
+  "response": "...",
+  "error": ""
+}
+```
+
+Status values:
+
+- `queued`
+- `processing`
+- `completed`
+- `failed`
 
 ### `GET /api/v1/ops/status`
 

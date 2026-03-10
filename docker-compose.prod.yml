@@ -64,6 +64,71 @@ services:
       start_period: 30s
     stop_grace_period: 20s
 
+  llm-worker:
+    image: ${APP_IMAGE:-ai-system:latest}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    profiles: ["llm-async"]
+    environment:
+      REDIS_RUNTIME_ROLE: app
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_SECRETS_MANAGER_SECRET_ID: ${AWS_SECRETS_MANAGER_SECRET_ID:?set AWS_SECRETS_MANAGER_SECRET_ID}
+      AWS_SECRETS_MANAGER_REGION: ${AWS_SECRETS_MANAGER_REGION:-us-east-1}
+    command: ["python", "-m", "app.scripts.llm_async_worker"]
+    stop_grace_period: 20s
+
+  eval-worker:
+    image: ${APP_IMAGE:-ai-system:latest}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    profiles: ["eval-queue"]
+    environment:
+      REDIS_RUNTIME_ROLE: app
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_SECRETS_MANAGER_SECRET_ID: ${AWS_SECRETS_MANAGER_SECRET_ID:?set AWS_SECRETS_MANAGER_SECRET_ID}
+      AWS_SECRETS_MANAGER_REGION: ${AWS_SECRETS_MANAGER_REGION:-us-east-1}
+    command: ["python", "-m", "app.scripts.eval_queue_worker"]
+    stop_grace_period: 20s
+
+  metrics-worker:
+    image: ${APP_IMAGE:-ai-system:latest}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    profiles: ["metrics-queue"]
+    environment:
+      REDIS_RUNTIME_ROLE: app
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_SECRETS_MANAGER_SECRET_ID: ${AWS_SECRETS_MANAGER_SECRET_ID:?set AWS_SECRETS_MANAGER_SECRET_ID}
+      AWS_SECRETS_MANAGER_REGION: ${AWS_SECRETS_MANAGER_REGION:-us-east-1}
+    command: ["python", "-m", "app.scripts.metrics_aggregation_worker"]
+    volumes:
+      - ./data/metrics:/app/data/metrics
+    stop_grace_period: 20s
+
   gradio:
     image: ${GRADIO_IMAGE:-ai-system-gradio:latest}
     init: true

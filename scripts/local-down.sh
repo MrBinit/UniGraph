@@ -21,6 +21,9 @@ COMPOSE_ARGS=(
   -f docker-compose.yml
   -f docker-compose.local.yml
   --profile local-redis
+  --profile llm-async
+  --profile eval-queue
+  --profile metrics-queue
 )
 
 echo "[local-down] Stopping local stack..."

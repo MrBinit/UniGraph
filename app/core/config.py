@@ -198,6 +198,64 @@ def _apply_env_overrides(data: dict) -> dict:
     _set(["middleware", "enable_backpressure"], "MIDDLEWARE_ENABLE_BACKPRESSURE", bool)
     _set(["middleware", "enable_route_matching"], "MIDDLEWARE_ENABLE_ROUTE_MATCHING", bool)
 
+    _set(["queue", "llm_async_enabled"], "LLM_ASYNC_ENABLED", bool)
+    _set(["queue", "llm_queue_url"], "LLM_QUEUE_URL")
+    _set(["queue", "llm_dlq_url"], "LLM_DLQ_URL")
+    _set(["queue", "llm_result_table"], "LLM_RESULT_TABLE")
+    _set(["queue", "llm_result_ttl_days"], "LLM_RESULT_TTL_DAYS", int)
+    _set(["queue", "llm_receive_wait_seconds"], "LLM_RECEIVE_WAIT_SECONDS", int)
+    _set(["queue", "llm_max_messages_per_poll"], "LLM_MAX_MESSAGES_PER_POLL", int)
+    _set(
+        ["queue", "llm_visibility_timeout_seconds"],
+        "LLM_VISIBILITY_TIMEOUT_SECONDS",
+        int,
+    )
+    _set(["queue", "llm_poll_sleep_seconds"], "LLM_POLL_SLEEP_SECONDS", float)
+    _set(
+        ["queue", "metrics_aggregation_queue_enabled"],
+        "METRICS_AGGREGATION_QUEUE_ENABLED",
+        bool,
+    )
+    _set(["queue", "metrics_aggregation_queue_url"], "METRICS_AGGREGATION_QUEUE_URL")
+    _set(
+        ["queue", "metrics_aggregation_receive_wait_seconds"],
+        "METRICS_AGGREGATION_RECEIVE_WAIT_SECONDS",
+        int,
+    )
+    _set(
+        ["queue", "metrics_aggregation_max_messages_per_poll"],
+        "METRICS_AGGREGATION_MAX_MESSAGES_PER_POLL",
+        int,
+    )
+    _set(
+        ["queue", "metrics_aggregation_visibility_timeout_seconds"],
+        "METRICS_AGGREGATION_VISIBILITY_TIMEOUT_SECONDS",
+        int,
+    )
+    _set(
+        ["queue", "metrics_aggregation_poll_sleep_seconds"],
+        "METRICS_AGGREGATION_POLL_SLEEP_SECONDS",
+        float,
+    )
+    _set(["queue", "evaluation_queue_enabled"], "EVALUATION_QUEUE_ENABLED", bool)
+    _set(["queue", "evaluation_queue_url"], "EVALUATION_QUEUE_URL")
+    _set(["queue", "evaluation_receive_wait_seconds"], "EVALUATION_RECEIVE_WAIT_SECONDS", int)
+    _set(
+        ["queue", "evaluation_max_messages_per_poll"],
+        "EVALUATION_MAX_MESSAGES_PER_POLL",
+        int,
+    )
+    _set(
+        ["queue", "evaluation_visibility_timeout_seconds"],
+        "EVALUATION_VISIBILITY_TIMEOUT_SECONDS",
+        int,
+    )
+    _set(
+        ["queue", "evaluation_poll_sleep_seconds"],
+        "EVALUATION_POLL_SLEEP_SECONDS",
+        float,
+    )
+
     return config
 
 

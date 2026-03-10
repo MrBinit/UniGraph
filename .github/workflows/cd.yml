@@ -168,8 +168,8 @@ jobs:
             chmod 775 data/metrics || true
 
             docker compose -f docker-compose.prod.yml --profile gradio pull api gradio
-            docker compose -f docker-compose.prod.yml --profile gradio up -d api worker gradio
-            docker compose -f docker-compose.prod.yml --profile gradio ps
+            docker compose -f docker-compose.prod.yml --profile gradio --profile llm-async --profile eval-queue --profile metrics-queue up -d api worker llm-worker gradio eval-worker metrics-worker
+            docker compose -f docker-compose.prod.yml --profile gradio --profile llm-async --profile eval-queue --profile metrics-queue ps
 
             wait_for_url() {
               local url="$1"
@@ -187,8 +187,8 @@ jobs:
                 attempt=$((attempt + 1))
               done
               echo "${name} failed health check: ${url}"
-              docker compose -f docker-compose.prod.yml --profile gradio ps
-              docker compose -f docker-compose.prod.yml --profile gradio logs --tail=200 api worker gradio || true
+              docker compose -f docker-compose.prod.yml --profile gradio --profile llm-async --profile eval-queue --profile metrics-queue ps
+              docker compose -f docker-compose.prod.yml --profile gradio --profile llm-async --profile eval-queue --profile metrics-queue logs --tail=200 api worker llm-worker gradio eval-worker metrics-worker || true
               return 1
             }
 

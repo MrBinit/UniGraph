@@ -10,6 +10,7 @@ from app.schemas.guardrails_config_schema import GuardrailsConfig
 from app.schemas.memory_config_schema import MemoryConfig, UserTokenBudgetConfig
 from app.schemas.middleware_config_schema import MiddlewareConfig
 from app.schemas.postgres_config_schema import PostgresConfig
+from app.schemas.queue_config_schema import QueueConfig
 from app.schemas.redis_config_schema import RedisConfig, RedisRoleConfig
 from app.schemas.security_config_schema import SecurityConfig
 
@@ -27,6 +28,7 @@ class Settings(BaseModel):
     guardrails: GuardrailsConfig
     security: SecurityConfig
     middleware: MiddlewareConfig
+    queue: QueueConfig
 
 
 __all__ = [
@@ -40,6 +42,7 @@ __all__ = [
     "MemoryConfig",
     "MiddlewareConfig",
     "PostgresConfig",
+    "QueueConfig",
     "RedisConfig",
     "RedisRoleConfig",
     "SecurityConfig",

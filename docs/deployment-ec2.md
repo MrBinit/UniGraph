@@ -112,6 +112,46 @@ Required IAM permission for instance role:
 }
 ```
 
+Optional SQS queue mode (metrics aggregation + per-request evaluations):
+
+- config keys:
+  - `METRICS_AGGREGATION_QUEUE_ENABLED`
+  - `METRICS_AGGREGATION_QUEUE_URL`
+  - `EVALUATION_QUEUE_ENABLED`
+  - `EVALUATION_QUEUE_URL`
+- workers:
+  - `python -m app.scripts.metrics_aggregation_worker`
+  - `python -m app.scripts.eval_queue_worker`
+- in compose:
+  - `metrics-worker` profile: `metrics-queue`
+  - `eval-worker` profile: `eval-queue`
+
+Required SQS IAM permissions:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowMetricsAndEvaluationQueues",
+      "Effect": "Allow",
+      "Action": [
+        "sqs:SendMessage",
+        "sqs:ReceiveMessage",
+        "sqs:DeleteMessage",
+        "sqs:ChangeMessageVisibility",
+        "sqs:GetQueueAttributes",
+        "sqs:GetQueueUrl"
+      ],
+      "Resource": [
+        "arn:aws:sqs:us-east-1:<account-id>:<metrics-aggregation-queue>",
+        "arn:aws:sqs:us-east-1:<account-id>:<evaluation-queue>"
+      ]
+    }
+  ]
+}
+```
+
 Gradio streaming notes:
 
 - Gradio response streaming is enabled by default via chunked progressive rendering.

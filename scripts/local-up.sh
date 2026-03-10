@@ -22,13 +22,16 @@ COMPOSE_ARGS=(
   -f docker-compose.yml
   -f docker-compose.local.yml
   --profile local-redis
+  --profile llm-async
+  --profile eval-queue
+  --profile metrics-queue
 )
 
 echo "[local-up] Building images..."
 docker compose --env-file "${ENV_FILE}" "${COMPOSE_ARGS[@]}" build api gradio
 
-echo "[local-up] Starting api/worker/redis/gradio (redis:${LOCAL_REDIS_PORT}, gradio:${GRADIO_PORT})..."
-docker compose --env-file "${ENV_FILE}" "${COMPOSE_ARGS[@]}" up -d --no-build api worker redis gradio
+echo "[local-up] Starting api/worker/llm-worker/eval-worker/metrics-worker/redis/gradio (redis:${LOCAL_REDIS_PORT}, gradio:${GRADIO_PORT})..."
+docker compose --env-file "${ENV_FILE}" "${COMPOSE_ARGS[@]}" up -d --no-build api worker llm-worker eval-worker metrics-worker redis gradio
 echo "[local-up] Started."
 echo "[local-up] API:    http://127.0.0.1:${API_PORT:-8000}"
 echo "[local-up] Gradio: http://127.0.0.1:${GRADIO_PORT}"

@@ -296,3 +296,15 @@ def append_chat_metrics_json(record: dict) -> None:
             _save_aggregate(aggregate_path, aggregate)
 
     persist_chat_metrics_dynamodb(normalized, aggregate)
+
+
+def load_chat_metrics_aggregate_json() -> dict | None:
+    """Return the latest aggregate JSON snapshot for out-of-band DynamoDB sync."""
+    aggregate_path = _aggregate_json_path()
+    if not aggregate_path.exists():
+        return None
+    with _aggregate_lock():
+        payload = _load_aggregate(aggregate_path)
+    if not isinstance(payload, dict):
+        return None
+    return payload

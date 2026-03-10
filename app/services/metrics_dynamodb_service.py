@@ -5,7 +5,14 @@ This module stores:
 2) a singleton aggregate snapshot item (`id=global`) in the configured aggregate table.
 
 The request item includes selected top-level attributes for easy querying
-(`session_id`, `outcome`, `latency_overall_ms`, `retrieval_strategy`, evidence counts, token usage)
+(
+    `session_id`,
+    `outcome`,
+    `latency_overall_ms`,
+    `retrieval_strategy`,
+    evidence counts,
+    token usage,
+)
 plus a full-fidelity `record_json` payload.
 """
 
@@ -15,6 +22,10 @@ import os
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from app.core.config import get_settings
+from app.services.sqs_event_queue_service import (
+    enqueue_evaluation_event,
+    enqueue_metrics_aggregation_event,
+)
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -47,7 +58,9 @@ def _dynamodb_client():
     try:
         import boto3
     except ImportError as exc:  # pragma: no cover
-        raise RuntimeError("boto3 is required for DynamoDB metrics persistence.") from exc
+        raise RuntimeError(
+            "boto3 is required for DynamoDB metrics persistence."
+        ) from exc
     kwargs = {"region_name": _region_name()} if _region_name() else {}
     return boto3.client("dynamodb", **kwargs)
 
@@ -78,10 +91,20 @@ def _persist_request_record(record: dict) -> None:
     if not request_id:
         return
 
-    timings = record.get("timings_ms", {}) if isinstance(record.get("timings_ms"), dict) else {}
-    retrieval = record.get("retrieval", {}) if isinstance(record.get("retrieval"), dict) else {}
-    llm_usage = record.get("llm_usage", {}) if isinstance(record.get("llm_usage"), dict) else {}
-    evidence = retrieval.get("evidence", []) if isinstance(retrieval.get("evidence"), list) else []
+    timings = record.get("timings_ms", {})
+    if not isinstance(timings, dict):
+        timings = {}
+    retrieval = (
+        record.get("retrieval", {}) if isinstance(record.get("retrieval"), dict) else {}
+    )
+    llm_usage = (
+        record.get("llm_usage", {}) if isinstance(record.get("llm_usage"), dict) else {}
+    )
+    evidence = (
+        retrieval.get("evidence", [])
+        if isinstance(retrieval.get("evidence"), list)
+        else []
+    )
     item = {
         "request_id": {"S": request_id},
         "timestamp": {"S": str(record.get("timestamp", _now_iso()))},
@@ -91,7 +114,9 @@ def _persist_request_record(record: dict) -> None:
         "retrieval_strategy": {"S": str(retrieval.get("strategy", ""))},
         "retrieval_result_count": {"N": _int_str(retrieval.get("result_count"))},
         "retrieval_evidence_count": {"N": _int_str(len(evidence))},
-        "retrieval_evidence_json": {"S": json.dumps(evidence, ensure_ascii=False, default=str)},
+        "retrieval_evidence_json": {
+            "S": json.dumps(evidence, ensure_ascii=False, default=str)
+        },
         "query": {"S": str(record.get("question", ""))},
         "answer": {"S": str(record.get("answer", ""))},
         "latency_overall_ms": {"N": _int_str(timings.get("overall_response_ms"))},
@@ -103,7 +128,9 @@ def _persist_request_record(record: dict) -> None:
         "record_json": {"S": json.dumps(record, ensure_ascii=False, default=str)},
     }
     if settings.app.metrics_dynamodb_ttl_days > 0:
-        item["expires_at"] = {"N": str(_ttl_epoch_seconds(settings.app.metrics_dynamodb_ttl_days))}
+        item["expires_at"] = {
+            "N": str(_ttl_epoch_seconds(settings.app.metrics_dynamodb_ttl_days))
+        }
 
     _dynamodb_client().put_item(TableName=table_name, Item=item)
 
@@ -116,7 +143,9 @@ def _persist_aggregate_snapshot(aggregate: dict | None) -> None:
 
     latency_raw = aggregate.get("latency_ms", {})
     latency = latency_raw if isinstance(latency_raw, dict) else {}
-    overall_latency = latency.get("overall", {}) if isinstance(latency.get("overall"), dict) else {}
+    overall_latency = (
+        latency.get("overall", {}) if isinstance(latency.get("overall"), dict) else {}
+    )
     item = {
         "id": {"S": "global"},
         "updated_at": {"S": str(aggregate.get("updated_at", _now_iso()))},
@@ -125,9 +154,58 @@ def _persist_aggregate_snapshot(aggregate: dict | None) -> None:
         "aggregate_json": {"S": json.dumps(aggregate, ensure_ascii=False, default=str)},
     }
     if settings.app.metrics_dynamodb_ttl_days > 0:
-        item["expires_at"] = {"N": str(_ttl_epoch_seconds(settings.app.metrics_dynamodb_ttl_days))}
+        item["expires_at"] = {
+            "N": str(_ttl_epoch_seconds(settings.app.metrics_dynamodb_ttl_days))
+        }
 
     _dynamodb_client().put_item(TableName=table_name, Item=item)
+
+
+def persist_aggregate_snapshot_dynamodb(aggregate: dict | None) -> None:
+    """Persist only the aggregate snapshot to DynamoDB.
+
+    This is used by the background metrics aggregation queue worker.
+    """
+    if not settings.app.metrics_dynamodb_enabled:
+        return
+    _persist_aggregate_snapshot(aggregate)
+
+
+def _queue_metrics_aggregation(record: dict, aggregate: dict | None) -> None:
+    """Queue aggregate synchronization when enabled, with inline fallback."""
+    request_id = str(record.get("request_id", "")).strip()
+    queue_enabled = bool(settings.queue.metrics_aggregation_queue_enabled)
+    queue_url = settings.queue.metrics_aggregation_queue_url.strip()
+    if queue_enabled and queue_url and request_id:
+        try:
+            enqueue_metrics_aggregation_event(request_id)
+            return
+        except Exception as exc:
+            logger.warning(
+                (
+                    "Metrics aggregation queue publish failed; "
+                    "falling back to inline aggregate write. %s"
+                ),
+                exc,
+            )
+    _persist_aggregate_snapshot(aggregate)
+
+
+def _queue_offline_evaluation(record: dict) -> None:
+    """Queue per-request offline evaluation jobs for successful answers."""
+    request_id = str(record.get("request_id", "")).strip()
+    outcome = str(record.get("outcome", "")).strip().lower()
+    if not request_id or outcome != "success":
+        return
+    if not settings.queue.evaluation_queue_enabled:
+        return
+    if not settings.queue.evaluation_queue_url.strip():
+        return
+    session_id = str(record.get("session_id") or record.get("user_id", "")).strip()
+    try:
+        enqueue_evaluation_event(request_id=request_id, session_id=session_id)
+    except Exception as exc:
+        logger.warning("Evaluation queue publish failed; continuing. %s", exc)
 
 
 def persist_chat_metrics_dynamodb(record: dict, aggregate: dict | None = None) -> None:
@@ -141,6 +219,7 @@ def persist_chat_metrics_dynamodb(record: dict, aggregate: dict | None = None) -
 
     try:
         _persist_request_record(record)
-        _persist_aggregate_snapshot(aggregate)
+        _queue_metrics_aggregation(record, aggregate)
+        _queue_offline_evaluation(record)
     except Exception as exc:
         logger.warning("DynamoDB metrics persistence failed; continuing. %s", exc)

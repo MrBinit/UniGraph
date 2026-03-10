@@ -1,9 +1,12 @@
 # UniGraph System Overview
 
 ## 1) End-to-End Request Flow
-Verified runtime order (`app/services/llm_service.py`):
+Queue-aware runtime order (API + worker path):
 
 `User Query`
+-> `POST /api/v1/chat`
+-> `SQS LLM Queue (unigraph-llm-jobs)`
+-> `LLM Worker Dequeue`
 -> `Input Guardrails`
 -> `Sanitized Prompt`
 -> `Response Cache Lookup`
@@ -16,11 +19,13 @@ Verified runtime order (`app/services/llm_service.py`):
 -> `Short-Term Memory Update`
 -> `Response Cache Write`
 -> `Evaluation Trace (background async task, non-blocking)`
--> `Offline Judge Evaluation (separate async worker, per request_id)`
--> `Metrics Persistence (JSON + DynamoDB)`
+-> `Metrics Persistence (JSON + DynamoDB request row)`
+-> `SQS Metrics Aggregation Queue (unigraph-metrics-aggregation-jobs, optional)`
+-> `SQS Evaluation Queue (unigraph-evaluation-jobs, optional, success-only request_id events)`
+-> `Offline Judge Evaluation Worker`
 
 Memory-first view:
-`Query` -> `Short-Term Memory` -> `Long-Term Memory` -> `LLM`.
+`Query` -> `LLM Job Queue` -> `Worker` -> `Short-Term Memory` -> `Long-Term Memory` -> `LLM` -> `Metrics/Evaluation Queues`.
 
 ## 2) Core Architecture
 - Domain: AI backend for university/research discovery.
@@ -32,6 +37,11 @@ Memory-first view:
 - Long-term memory: PostgreSQL + pgvector (`document_chunks`), HNSW default.
 - Short-term memory: Redis (encrypted payloads, TTL, recent-window + summary strategy).
 - Queue: Redis Streams consumer group for async summary compaction.
+- Queue (SQS):
+  - `unigraph-llm-jobs` for async chat request admission and worker fan-out
+  - `unigraph-metrics-aggregation-jobs` for aggregate sync
+  - `unigraph-evaluation-jobs` for per-request offline judge
+  - DLQs: `unigraph-llm-jobs-dlq`, `unigraph-metrics-aggregation-jobs-dlq`, `unigraph-evaluation-jobs-dlq`
 - Caching:
   - `app:cache:chat:{user_id}:{sanitized_prompt}`
   - embedding cache
@@ -55,6 +65,7 @@ Offline evaluation results are stored in a separate table keyed by `request_id`:
 - Evaluations table: `unigraph-chat-evaluations`
 - Judge model: Amazon Nova 2 Lite (`us.amazon.nova-2-lite-v1:0`)
 - Stored fields include `clarity_score`, `relevance_score`, `hallucination_score`, `evidence_similarity_score`, `answered_question`, `failure_reason`, and `overall_score`.
+- Queue mode supports event-driven evaluation by `request_id` (instead of only scan scheduling).
 
 ## 4) Guardrails, Security, and Scalability
 - Input/context/output guardrails enabled.
@@ -112,6 +123,7 @@ Offline evaluation results are stored in a separate table keyed by `request_id`:
 - Each request now stores a compact retrieval evidence snapshot (top retrieved chunks, ids, metadata, distances, trimmed content) and offline hallucination checks are grounded against that evidence.
 - Offline evaluation uses three separate LLM-as-judge prompts (clarity, relevance, hallucination) with Nova 2 Lite.
 - Daily reporting computes p50/p95, failure-reason distribution, and top low-score examples.
+- Evaluation and metrics aggregation can run in queue-driven mode through dedicated SQS workers.
 - Evaluation can be triggered two ways:
   - on-demand API run (`POST /api/v1/eval/offline/run?force=true`)
   - scheduled background run every 24 hours (configurable) that executes only when new successful requests exist.
@@ -124,7 +136,7 @@ Pipeline:
 
 `request + retrieval evidence snapshot`
 -> `DynamoDB requests table`
--> `offline evaluator scan`
+-> `evaluation event queue (optional) OR offline evaluator scan`
 -> `judge(clarity)`
 -> `judge(relevance)`
 -> `judge(hallucination vs retrieval evidence)`

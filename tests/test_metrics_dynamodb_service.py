@@ -11,7 +11,9 @@ class _FakeDynamoClient:
 
 def test_persist_chat_metrics_dynamodb_writes_request_and_aggregate(monkeypatch):
     fake = _FakeDynamoClient()
-    monkeypatch.setattr(metrics_dynamodb_service.settings.app, "metrics_dynamodb_enabled", True)
+    monkeypatch.setattr(
+        metrics_dynamodb_service.settings.app, "metrics_dynamodb_enabled", True
+    )
     monkeypatch.setattr(
         metrics_dynamodb_service.settings.app,
         "metrics_dynamodb_requests_table",
@@ -72,7 +74,9 @@ def test_persist_chat_metrics_dynamodb_writes_request_and_aggregate(monkeypatch)
 
 def test_persist_chat_metrics_dynamodb_skips_when_disabled(monkeypatch):
     fake = _FakeDynamoClient()
-    monkeypatch.setattr(metrics_dynamodb_service.settings.app, "metrics_dynamodb_enabled", False)
+    monkeypatch.setattr(
+        metrics_dynamodb_service.settings.app, "metrics_dynamodb_enabled", False
+    )
     monkeypatch.setattr(metrics_dynamodb_service, "_dynamodb_client", lambda: fake)
 
     metrics_dynamodb_service.persist_chat_metrics_dynamodb(
@@ -80,3 +84,124 @@ def test_persist_chat_metrics_dynamodb_skips_when_disabled(monkeypatch):
         {"total_requests": 1},
     )
     assert not fake.calls
+
+
+def test_persist_chat_metrics_dynamodb_queues_aggregate_when_enabled(monkeypatch):
+    fake = _FakeDynamoClient()
+    queued = []
+    monkeypatch.setattr(
+        metrics_dynamodb_service.settings.app, "metrics_dynamodb_enabled", True
+    )
+    monkeypatch.setattr(
+        metrics_dynamodb_service.settings.app,
+        "metrics_dynamodb_requests_table",
+        "chat-metrics-requests",
+    )
+    monkeypatch.setattr(
+        metrics_dynamodb_service.settings.app,
+        "metrics_dynamodb_aggregate_table",
+        "chat-metrics-aggregate",
+    )
+    monkeypatch.setattr(
+        metrics_dynamodb_service.settings.queue,
+        "metrics_aggregation_queue_enabled",
+        True,
+    )
+    monkeypatch.setattr(
+        metrics_dynamodb_service.settings.queue,
+        "metrics_aggregation_queue_url",
+        "https://sqs.example/metrics",
+    )
+    monkeypatch.setattr(
+        metrics_dynamodb_service.settings.queue,
+        "evaluation_queue_enabled",
+        False,
+    )
+    monkeypatch.setattr(
+        metrics_dynamodb_service,
+        "enqueue_metrics_aggregation_event",
+        lambda request_id: queued.append(request_id),
+    )
+    monkeypatch.setattr(metrics_dynamodb_service, "_dynamodb_client", lambda: fake)
+
+    metrics_dynamodb_service.persist_chat_metrics_dynamodb(
+        {
+            "request_id": "req-queue-1",
+            "timestamp": "2026-03-10T00:00:00+00:00",
+            "user_id": "user-1",
+            "session_id": "session-1",
+            "outcome": "success",
+            "retrieval": {"strategy": "hnsw", "result_count": 1, "evidence": []},
+            "llm_usage": {"prompt_tokens": 5, "total_tokens": 9},
+            "question": "q",
+            "answer": "a",
+            "timings_ms": {"overall_response_ms": 10},
+        },
+        {"updated_at": "2026-03-10T00:00:00+00:00", "total_requests": 1},
+    )
+
+    # Request record is written inline; aggregate write is offloaded to queue.
+    assert len(fake.calls) == 1
+    assert fake.calls[0]["TableName"] == "chat-metrics-requests"
+    assert queued == ["req-queue-1"]
+
+
+def test_persist_chat_metrics_dynamodb_queues_eval_event(monkeypatch):
+    fake = _FakeDynamoClient()
+    eval_events = []
+    monkeypatch.setattr(
+        metrics_dynamodb_service.settings.app, "metrics_dynamodb_enabled", True
+    )
+    monkeypatch.setattr(
+        metrics_dynamodb_service.settings.app,
+        "metrics_dynamodb_requests_table",
+        "chat-metrics-requests",
+    )
+    monkeypatch.setattr(
+        metrics_dynamodb_service.settings.app,
+        "metrics_dynamodb_aggregate_table",
+        "chat-metrics-aggregate",
+    )
+    monkeypatch.setattr(
+        metrics_dynamodb_service.settings.queue,
+        "metrics_aggregation_queue_enabled",
+        False,
+    )
+    monkeypatch.setattr(
+        metrics_dynamodb_service.settings.queue, "evaluation_queue_enabled", True
+    )
+    monkeypatch.setattr(
+        metrics_dynamodb_service.settings.queue,
+        "evaluation_queue_url",
+        "https://sqs.example/eval",
+    )
+    monkeypatch.setattr(
+        metrics_dynamodb_service,
+        "enqueue_evaluation_event",
+        lambda request_id, session_id="": eval_events.append((request_id, session_id)),
+    )
+    monkeypatch.setattr(metrics_dynamodb_service, "_dynamodb_client", lambda: fake)
+
+    metrics_dynamodb_service.persist_chat_metrics_dynamodb(
+        {
+            "request_id": "req-eval-1",
+            "timestamp": "2026-03-10T00:00:00+00:00",
+            "user_id": "user-2",
+            "session_id": "session-2",
+            "outcome": "success",
+            "retrieval": {"strategy": "hnsw", "result_count": 1, "evidence": []},
+            "llm_usage": {"prompt_tokens": 5, "total_tokens": 9},
+            "question": "q",
+            "answer": "a",
+            "timings_ms": {"overall_response_ms": 10},
+        },
+        {
+            "updated_at": "2026-03-10T00:00:00+00:00",
+            "total_requests": 1,
+            "latency_ms": {"overall": {"average": 10.0}},
+        },
+    )
+
+    # Request + aggregate are still persisted inline when aggregate queue is disabled.
+    assert len(fake.calls) == 2
+    assert eval_events == [("req-eval-1", "session-2")]

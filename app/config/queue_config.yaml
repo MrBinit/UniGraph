@@ -1,0 +1,22 @@
+queue:
+  llm_async_enabled: false
+  llm_queue_url: "https://sqs.us-east-1.amazonaws.com/173763384281/unigraph-llm-jobs"
+  llm_dlq_url: "https://sqs.us-east-1.amazonaws.com/173763384281/unigraph-llm-jobs-dlq"
+  llm_result_table: "unigraph-llm-results"
+  llm_result_ttl_days: 7
+  llm_receive_wait_seconds: 20
+  llm_max_messages_per_poll: 5
+  llm_visibility_timeout_seconds: 300
+  llm_poll_sleep_seconds: 1.0
+  metrics_aggregation_queue_enabled: false
+  metrics_aggregation_queue_url: "https://sqs.us-east-1.amazonaws.com/173763384281/unigraph-metrics-aggregation-jobs"
+  metrics_aggregation_receive_wait_seconds: 20
+  metrics_aggregation_max_messages_per_poll: 10
+  metrics_aggregation_visibility_timeout_seconds: 300
+  metrics_aggregation_poll_sleep_seconds: 1.0
+  evaluation_queue_enabled: false
+  evaluation_queue_url: "https://sqs.us-east-1.amazonaws.com/173763384281/unigraph-evaluation-jobs"
+  evaluation_receive_wait_seconds: 20
+  evaluation_max_messages_per_poll: 10
+  evaluation_visibility_timeout_seconds: 300
+  evaluation_poll_sleep_seconds: 1.0
