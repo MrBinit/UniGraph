@@ -1,4 +1,4 @@
-# UniGraph System Overview
+# Overview UniGraph System
 
 ## 1) End-to-End Request Flow
 Verified runtime order (`app/services/llm_service.py`):
@@ -90,7 +90,7 @@ Memory-first view (cache miss path):
 - Summary pipeline is decoupled through Redis Streams worker group (`memory-summary-workers`).
 
 ## 7) Deployment
-Dockerized services -> ECR images -> EC2 runtime  
+Dockerized services -> ECR images -> EC2 runtime
 with IAM role, Secrets Manager, ElastiCache, and RDS.
 
 ## 8) Data Scale
@@ -106,5 +106,5 @@ with IAM role, Secrets Manager, ElastiCache, and RDS.
 - Avg short-term memory latency: **18.2 ms**
 - Avg long-term memory latency: **24.7 ms**
 - Avg cache read/write latency: **1.3 ms / 1.0 ms**
-- Avg tokens per successful request: **3,658.8**  
+- Avg tokens per successful request: **3,658.8**
   (`2,489` prompt + `1,169.8` completion)
