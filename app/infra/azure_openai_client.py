@@ -41,7 +41,9 @@ class _CompatResponse:
     usage: _CompatUsage
 
 
-def _to_bedrock_payload(messages: list[dict[str, Any]]) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
+def _to_bedrock_payload(
+    messages: list[dict[str, Any]],
+) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
     """Convert OpenAI-style chat messages into Bedrock Converse payload fields."""
     system_blocks: list[dict[str, str]] = []
     convo_messages: list[dict[str, Any]] = []
@@ -71,18 +73,14 @@ def _to_bedrock_payload(messages: list[dict[str, Any]]) -> tuple[list[dict[str, 
         )
 
     if not convo_messages:
-        convo_messages = [{"role": "user", "content": [{"text": " "}] }]
+        convo_messages = [{"role": "user", "content": [{"text": " "}]}]
 
     return system_blocks, convo_messages
 
 
 def _from_bedrock_response(response: dict[str, Any]) -> _CompatResponse:
     """Normalize Bedrock Converse response into the subset used by services."""
-    content_blocks = (
-        response.get("output", {})
-        .get("message", {})
-        .get("content", [])
-    )
+    content_blocks = response.get("output", {}).get("message", {}).get("content", [])
     texts: list[str] = []
     if isinstance(content_blocks, list):
         for block in content_blocks:
@@ -108,7 +106,9 @@ def _from_bedrock_response(response: dict[str, Any]) -> _CompatResponse:
 
 
 class _BedrockCompatCompletions:
-    async def create(self, *, model: str, messages: list[dict[str, Any]], timeout: int | None = None):
+    async def create(
+        self, *, model: str, messages: list[dict[str, Any]], timeout: int | None = None
+    ):
         """OpenAI-compatible async chat-completions entrypoint backed by Bedrock Converse."""
         system_blocks, convo_messages = _to_bedrock_payload(messages)
 
