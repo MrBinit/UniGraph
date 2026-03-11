@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 import sys
+from uuid import uuid4
 
 import gradio as gr
 
@@ -10,26 +11,35 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from app.services.llm_service import generate_response_stream
 
-DEFAULT_USER_ID = "gradio-user"
+SESSION_USER_ID_PREFIX = "gradio-session"
 STREAM_CHUNK_SIZE = int(os.getenv("GRADIO_STREAM_CHUNK_SIZE", "120"))
 STREAM_CHUNK_DELAY_MS = int(os.getenv("GRADIO_STREAM_CHUNK_DELAY_MS", "12"))
 
 
-async def answer_question_stream(question: str):
+def _resolve_session_user_id(session_user_id: str | None) -> str:
+    candidate = str(session_user_id or "").strip()
+    if candidate:
+        return candidate
+    return f"{SESSION_USER_ID_PREFIX}-{uuid4().hex}"
+
+
+async def answer_question_stream(question: str, session_user_id: str | None):
+    resolved_user_id = _resolve_session_user_id(session_user_id)
     question = (question or "").strip()
     if not question:
-        yield ""
+        yield "", resolved_user_id
         return
     async for partial in generate_response_stream(
-        DEFAULT_USER_ID,
+        resolved_user_id,
         question,
         chunk_size=STREAM_CHUNK_SIZE,
         chunk_delay_ms=STREAM_CHUNK_DELAY_MS,
     ):
-        yield partial
+        yield partial, resolved_user_id
 
 
 with gr.Blocks(title="Simple Q&A") as demo:
+    session_user_id_state = gr.State(value=None)
     question_input = gr.Textbox(
         label="Question",
         placeholder="Ask a question...",
@@ -44,13 +54,13 @@ with gr.Blocks(title="Simple Q&A") as demo:
 
     ask_button.click(
         fn=answer_question_stream,
-        inputs=question_input,
-        outputs=answer_output,
+        inputs=[question_input, session_user_id_state],
+        outputs=[answer_output, session_user_id_state],
     )
     question_input.submit(
         fn=answer_question_stream,
-        inputs=question_input,
-        outputs=answer_output,
+        inputs=[question_input, session_user_id_state],
+        outputs=[answer_output, session_user_id_state],
     )
 
 

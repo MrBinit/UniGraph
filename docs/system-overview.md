@@ -71,11 +71,13 @@ Offline evaluation results are stored in a separate table keyed by `request_id`:
 - Input/context/output guardrails enabled.
 - JWT authentication (`HS256`) enabled.
 - Distributed rate limiting + backpressure via Redis.
+- Local backpressure fallback uses an atomic lock+counter gate (no private semaphore internals), so local admission/rejection is race-safe under concurrency.
 - Timeout middleware enabled for request protection.
 - Secrets Manager integration for sensitive runtime values.
 - TLS for ElastiCache and hardened production containers.
 - API/worker services are stateless and horizontally scalable.
 - Startup backend warmup added: Redis ping + Postgres pool query.
+- Gradio chat UI isolates short-term memory per browser session using a generated session user id (`gradio-session-<uuid>`), persisted in `gr.State` for that session.
 
 ## 5) Token and Context Budgeting (Current)
 - Retrieval `top_k=2`.

@@ -94,6 +94,19 @@ High-risk patterns:
 - `average_ms` rising sharply: model, Redis, or middleware pressure is increasing
 - `compaction.events` exploding: user context may be too large or budgets may be too low
 
+## Backpressure Behavior
+
+Backpressure runs as two gates:
+
+- distributed gate (Redis sorted-set lease) for cross-instance admission control
+- local gate (atomic lock+counter) for per-process in-flight limits
+
+Local gate behavior:
+
+- when local in-flight count reaches `max_in_flight_requests`, requests are rejected with `503`
+- local admission and release are atomic; there is no private semaphore pre-check
+- if a request is rejected by the local gate after distributed admission, the Redis lease token is released immediately
+
 ## Current Alerting
 
 DLQ alerting is log-based right now.
@@ -109,6 +122,18 @@ This is useful immediately, but should later be connected to:
 - Datadog
 - CloudWatch
 - Grafana alerting
+
+## Gradio Session Isolation
+
+Gradio no longer uses one shared memory identity.
+
+- each browser session gets a generated user id: `gradio-session-<uuid>`
+- the id is stored in `gr.State` and reused for later submits from that same session
+- short-term memory and cache keys are therefore isolated per Gradio session instead of being shared globally
+
+Operational note:
+
+- if memory keys are inspected in Redis, expect multiple session-scoped keys rather than one shared `gradio-user` key
 
 ## JSON Metrics Persistence
 

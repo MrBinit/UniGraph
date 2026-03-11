@@ -75,7 +75,9 @@ class BackpressureMiddleware(BaseHTTPMiddleware):
         distributed_lease_seconds: int = 45,
     ):
         super().__init__(app)
-        self._semaphore = asyncio.Semaphore(max_in_flight_requests)
+        self._max_in_flight_requests = max_in_flight_requests
+        self._local_in_flight = 0
+        self._local_gate_lock = asyncio.Lock()
         self._redis_gate = (
             _RedisBackpressureGate(
                 key=app_scoped_key(redis_key),
@@ -85,6 +87,19 @@ class BackpressureMiddleware(BaseHTTPMiddleware):
             if use_redis
             else None
         )
+
+    async def _try_acquire_local_slot(self) -> bool:
+        """Atomically reserve one local in-flight slot without private semaphore internals."""
+        async with self._local_gate_lock:
+            if self._local_in_flight >= self._max_in_flight_requests:
+                return False
+            self._local_in_flight += 1
+            return True
+
+    async def _release_local_slot(self):
+        """Release one local in-flight slot."""
+        async with self._local_gate_lock:
+            self._local_in_flight = max(0, self._local_in_flight - 1)
 
     async def dispatch(self, request, call_next):
         redis_token = uuid.uuid4().hex
@@ -116,7 +131,8 @@ class BackpressureMiddleware(BaseHTTPMiddleware):
                 )
             acquired_distributed = True
 
-        if self._semaphore._value <= 0:  # noqa: SLF001
+        acquired_local = await self._try_acquire_local_slot()
+        if not acquired_local:
             logger.warning(
                 "BackpressureReject | method=%s path=%s",
                 request.method,
@@ -134,11 +150,10 @@ class BackpressureMiddleware(BaseHTTPMiddleware):
                 content={"detail": "Server is busy. Please retry shortly."},
             )
 
-        await self._semaphore.acquire()
         try:
             return await call_next(request)
         finally:
-            self._semaphore.release()
+            await self._release_local_slot()
             if acquired_distributed and self._redis_gate is not None:
                 try:
                     await asyncio.to_thread(self._redis_gate.release, redis_token)

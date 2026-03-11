@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from app.api.v1 import chat as chat_api
 from app.core.security import create_access_token
+from app import main as main_app
 from app.main import app
 from app.middlewares import backpressure, rate_limit
 from app.services import (
@@ -204,6 +205,10 @@ async def _fake_noop(*_args, **_kwargs):
     return None
 
 
+def _fake_noop_sync(*_args, **_kwargs):
+    return None
+
+
 class _Message:
     def __init__(self, content):
         self.content = content
@@ -257,6 +262,9 @@ def test_api_to_queue_to_worker_to_memory_update(monkeypatch):
     monkeypatch.setattr(summary_queue_service, "worker_redis_client", fake_redis)
     monkeypatch.setattr(rate_limit, "app_redis_client", fake_redis)
     monkeypatch.setattr(backpressure, "app_redis_client", fake_redis)
+    monkeypatch.setattr(main_app, "app_redis_client", fake_redis)
+    monkeypatch.setattr(main_app, "start_offline_eval_scheduler", _fake_noop_sync)
+    monkeypatch.setattr(main_app, "stop_offline_eval_scheduler", _fake_noop)
 
     def _fake_enqueue_chat_job(*, user_id: str, prompt: str, session_id: str | None = None):
         answer = asyncio.run(llm_service.generate_response(user_id, prompt))
@@ -297,6 +305,7 @@ def test_api_to_queue_to_worker_to_memory_update(monkeypatch):
     monkeypatch.setattr(llm_service, "_call_primary", fake_primary)
     monkeypatch.setattr(llm_service, "aretrieve_document_chunks", fake_retrieval)
     monkeypatch.setattr(llm_service, "_persist_evaluation_trace", _fake_noop)
+    monkeypatch.setattr(llm_service, "_record_json_metrics", _fake_noop)
     monkeypatch.setattr(summary_worker_service, "summarize_messages", fake_summary)
     monkeypatch.setattr(memory_service, "safe_token_count", lambda *_args: 9999)
     monkeypatch.setattr(
@@ -316,58 +325,57 @@ def test_api_to_queue_to_worker_to_memory_update(monkeypatch):
     memory_service.save_memory("user-1", _base_memory())
 
     user_token = create_access_token(user_id="user-1", roles=["user"])
-    client = TestClient(app)
+    with TestClient(app) as client:
+        chat_response = client.post(
+            "/api/v1/chat",
+            json={"user_id": "user-1", "prompt": "find ai research lab"},
+            headers={"Authorization": f"Bearer {user_token}"},
+        )
 
-    chat_response = client.post(
-        "/api/v1/chat",
-        json={"user_id": "user-1", "prompt": "find ai research lab"},
-        headers={"Authorization": f"Bearer {user_token}"},
-    )
+        assert chat_response.status_code == 202
+        payload = chat_response.json()
+        assert payload["job_id"] == "job-0001"
+        assert payload["status"] == "queued"
 
-    assert chat_response.status_code == 202
-    payload = chat_response.json()
-    assert payload["job_id"] == "job-0001"
-    assert payload["status"] == "queued"
+        chat_status_response = client.get(
+            "/api/v1/chat/job-0001",
+            headers={"Authorization": f"Bearer {user_token}"},
+        )
+        assert chat_status_response.status_code == 200
+        status_payload = chat_status_response.json()
+        assert status_payload["status"] == "completed"
+        assert status_payload["response"] == "assistant-output"
 
-    chat_status_response = client.get(
-        "/api/v1/chat/job-0001",
-        headers={"Authorization": f"Bearer {user_token}"},
-    )
-    assert chat_status_response.status_code == 200
-    status_payload = chat_status_response.json()
-    assert status_payload["status"] == "completed"
-    assert status_payload["response"] == "assistant-output"
+        jobs = summary_queue_service.read_summary_jobs("worker-1")
+        assert len(jobs) == 1
 
-    jobs = summary_queue_service.read_summary_jobs("worker-1")
-    assert len(jobs) == 1
+        stream_id, fields = jobs[0]
+        asyncio.run(summary_worker_service.process_summary_job(stream_id, fields))
 
-    stream_id, fields = jobs[0]
-    asyncio.run(summary_worker_service.process_summary_job(stream_id, fields))
+        final_memory = asyncio.run(memory_service.load_memory("user-1"))
+        assert final_memory["summary"] == "condensed summary"
+        assert final_memory["last_summarized_seq"] == 2
+        assert final_memory["summary_pending"] is False
+        assert final_memory["last_summary_job_id"] == ""
 
-    final_memory = asyncio.run(memory_service.load_memory("user-1"))
-    assert final_memory["summary"] == "condensed summary"
-    assert final_memory["last_summarized_seq"] == 2
-    assert final_memory["summary_pending"] is False
-    assert final_memory["last_summary_job_id"] == ""
+        queue_state = summary_queue_service.get_summary_queue_state()
+        assert queue_state["pending_jobs"] == 0
 
-    queue_state = summary_queue_service.get_summary_queue_state()
-    assert queue_state["pending_jobs"] == 0
+        admin_token = create_access_token(user_id="admin-1", roles=["admin"])
+        ops_response = client.get(
+            "/api/v1/ops/status",
+            headers={"Authorization": f"Bearer {admin_token}"},
+        )
 
-    admin_token = create_access_token(user_id="admin-1", roles=["admin"])
-    ops_response = client.get(
-        "/api/v1/ops/status",
-        headers={"Authorization": f"Bearer {admin_token}"},
-    )
-
-    assert ops_response.status_code == 200
-    payload = ops_response.json()
-    assert payload["status"] == "ok"
-    assert payload["memory"]["redis_available"] is True
-    assert payload["queue"]["dlq_depth"] == 0
-    assert payload["compaction"]["events"] == 1
-    assert payload["latency"]["count"] >= 1
-    assert payload["latency"]["pipeline_count"] >= 1
-    assert payload["latency"]["last_build_context_ms"] >= 0
-    assert payload["latency"]["last_retrieval_ms"] >= 0
-    assert payload["latency"]["last_model_ms"] >= 0
-    assert payload["latency"]["last_outcome"] == "success"
+        assert ops_response.status_code == 200
+        payload = ops_response.json()
+        assert payload["status"] == "ok"
+        assert payload["memory"]["redis_available"] is True
+        assert payload["queue"]["dlq_depth"] == 0
+        assert payload["compaction"]["events"] == 1
+        assert payload["latency"]["count"] >= 1
+        assert payload["latency"]["pipeline_count"] >= 1
+        assert payload["latency"]["last_build_context_ms"] >= 0
+        assert payload["latency"]["last_retrieval_ms"] >= 0
+        assert payload["latency"]["last_model_ms"] >= 0
+        assert payload["latency"]["last_outcome"] == "success"

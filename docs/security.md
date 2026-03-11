@@ -99,6 +99,7 @@ Fallback model:
 
 - if Redis is unavailable, middleware falls back to local in-memory controls
 - this avoids total traffic outage while preserving some protection
+- local backpressure fallback uses an atomic lock+counter gate (race-safe admission/rejection), not private semaphore internals
 
 Rate limiting key:
 
