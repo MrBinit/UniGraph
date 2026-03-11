@@ -3,7 +3,13 @@ from pathlib import Path
 import sys
 from uuid import uuid4
 
-import gradio as gr
+try:
+    import gradio as gr
+except Exception as exc:  # pragma: no cover - environment dependent import safety
+    gr = None
+    _GRADIO_IMPORT_ERROR = exc
+else:
+    _GRADIO_IMPORT_ERROR = None
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -38,33 +44,43 @@ async def answer_question_stream(question: str, session_user_id: str | None):
         yield partial, resolved_user_id
 
 
-with gr.Blocks(title="Simple Q&A") as demo:
-    session_user_id_state = gr.State(value=None)
-    question_input = gr.Textbox(
-        label="Question",
-        placeholder="Ask a question...",
-        lines=2,
-    )
-    answer_output = gr.Textbox(
-        label="Answer",
-        lines=8,
-        interactive=False,
-    )
-    ask_button = gr.Button("Ask")
+def _build_demo():
+    if gr is None:
+        return None
 
-    ask_button.click(
-        fn=answer_question_stream,
-        inputs=[question_input, session_user_id_state],
-        outputs=[answer_output, session_user_id_state],
-    )
-    question_input.submit(
-        fn=answer_question_stream,
-        inputs=[question_input, session_user_id_state],
-        outputs=[answer_output, session_user_id_state],
-    )
+    with gr.Blocks(title="Simple Q&A") as gradio_demo:
+        session_user_id_state = gr.State(value=None)
+        question_input = gr.Textbox(
+            label="Question",
+            placeholder="Ask a question...",
+            lines=2,
+        )
+        answer_output = gr.Textbox(
+            label="Answer",
+            lines=8,
+            interactive=False,
+        )
+        ask_button = gr.Button("Ask")
+
+        ask_button.click(
+            fn=answer_question_stream,
+            inputs=[question_input, session_user_id_state],
+            outputs=[answer_output, session_user_id_state],
+        )
+        question_input.submit(
+            fn=answer_question_stream,
+            inputs=[question_input, session_user_id_state],
+            outputs=[answer_output, session_user_id_state],
+        )
+    return gradio_demo
+
+
+demo = _build_demo()
 
 
 if __name__ == "__main__":
+    if demo is None:
+        raise RuntimeError(f"Gradio UI dependencies are unavailable: {_GRADIO_IMPORT_ERROR}")
     demo.launch(
         server_name=os.getenv("GRADIO_SERVER_NAME", "127.0.0.1"),
         server_port=int(os.getenv("GRADIO_SERVER_PORT", "7860")),
