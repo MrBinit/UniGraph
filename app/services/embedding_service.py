@@ -1,13 +1,15 @@
 import asyncio
 import hashlib
+import inspect
 import json
 from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core.config import get_settings
 from app.core.paths import resolve_project_path
-from app.infra.bedrock_client import get_bedrock_runtime_client
-from app.infra.redis_client import app_scoped_key, redis_client
+from app.infra.bedrock_client import ainvoke_model_json, get_bedrock_runtime_client
+from app.infra.io_limiters import dependency_limiter
+from app.infra.redis_client import app_scoped_key, async_redis_client, redis_client
 
 settings = get_settings()
 
@@ -91,6 +93,34 @@ def _read_cached_embedding(cache_key: str) -> list[float] | None:
         return None
 
 
+async def _maybe_await(value):
+    """Await a value when it is awaitable, otherwise return it directly."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _aread_cached_embedding(cache_key: str) -> list[float] | None:
+    """Async cache lookup for one embedding vector."""
+    try:
+        async with dependency_limiter("redis"):
+            cached = await _maybe_await(async_redis_client.get(cache_key))
+    except Exception:
+        return None
+    if not cached:
+        return None
+    try:
+        payload = json.loads(cached)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, list) or not payload:
+        return None
+    try:
+        return [float(value) for value in payload]
+    except (TypeError, ValueError):
+        return None
+
+
 def _write_cached_embedding(cache_key: str, embedding: list[float]) -> None:
     """Persist an embedding vector in Redis with the configured TTL."""
     try:
@@ -99,6 +129,21 @@ def _write_cached_embedding(cache_key: str, embedding: list[float]) -> None:
             settings.embedding.cache_ttl_seconds,
             json.dumps(embedding),
         )
+    except Exception:
+        return
+
+
+async def _awrite_cached_embedding(cache_key: str, embedding: list[float]) -> None:
+    """Async cache write for one embedding vector."""
+    try:
+        async with dependency_limiter("redis"):
+            await _maybe_await(
+                async_redis_client.setex(
+                    cache_key,
+                    settings.embedding.cache_ttl_seconds,
+                    json.dumps(embedding),
+                )
+            )
     except Exception:
         return
 
@@ -127,8 +172,24 @@ def embed_text(text: str) -> list[float]:
 
 
 async def aembed_text(text: str) -> list[float]:
-    """Generate a Bedrock embedding vector without blocking the event loop."""
-    return await asyncio.to_thread(embed_text, text)
+    """Generate a Bedrock embedding vector using async cache and bounded Bedrock I/O."""
+    truncated = _normalized_embed_text(text)
+    cache_key = _embedding_cache_key(truncated)
+    cached_embedding = await _aread_cached_embedding(cache_key)
+    if cached_embedding is not None:
+        return cached_embedding
+
+    payload = {
+        "modelId": settings.embedding.model_id,
+        "body": json.dumps({"inputText": truncated}),
+        "contentType": "application/json",
+        "accept": "application/json",
+    }
+    async with dependency_limiter("embedding"):
+        response_payload = await ainvoke_model_json(payload, timeout=settings.azure_openai.timeout)
+    embedding = _coerce_embedding(response_payload)
+    await _awrite_cached_embedding(cache_key, embedding)
+    return embedding
 
 
 def embed_chunk_manifest(chunk_manifest_path: Path, output_dir: Path | None = None) -> Path:

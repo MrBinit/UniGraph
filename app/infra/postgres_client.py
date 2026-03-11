@@ -4,6 +4,7 @@ from app.core.config import get_settings
 
 settings = get_settings()
 _POOL = None
+_ASYNC_POOL = None
 
 
 def _postgres_password() -> str:
@@ -56,12 +57,44 @@ def get_postgres_pool():
     return _POOL
 
 
+def get_async_postgres_pool():
+    """Return the shared async Postgres pool, creating it on first use."""
+    global _ASYNC_POOL
+
+    if not settings.postgres.enabled:
+        raise RuntimeError("Postgres is disabled in config.")
+
+    if _ASYNC_POOL is None:
+        try:
+            from psycopg.rows import dict_row
+            from psycopg_pool import AsyncConnectionPool
+        except ImportError as exc:  # pragma: no cover
+            raise RuntimeError(
+                "psycopg and psycopg_pool are required for Postgres. Install requirements first."
+            ) from exc
+        _ASYNC_POOL = AsyncConnectionPool(
+            conninfo=build_postgres_conninfo(),
+            min_size=settings.postgres.min_pool_size,
+            max_size=settings.postgres.max_pool_size,
+            kwargs={"row_factory": dict_row},
+        )
+    return _ASYNC_POOL
+
+
 def close_postgres_pool():
     """Close and clear the shared Postgres pool when the process shuts down."""
     global _POOL
     if _POOL is not None:
         _POOL.close()
         _POOL = None
+
+
+async def close_async_postgres_pool():
+    """Close and clear the shared async Postgres pool when the process shuts down."""
+    global _ASYNC_POOL
+    if _ASYNC_POOL is not None:
+        await _ASYNC_POOL.close()
+        _ASYNC_POOL = None
 
 
 def verify_postgres_connection() -> dict:

@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import logging
 import time
 from typing import AsyncIterator
@@ -6,7 +7,8 @@ from uuid import uuid4
 from redis.exceptions import RedisError
 from app.core.config import get_prompts, get_settings
 from app.infra.azure_openai_client import client
-from app.infra.redis_client import app_scoped_key, redis_client
+from app.infra.io_limiters import dependency_limiter
+from app.infra.redis_client import app_scoped_key, async_redis_client, redis_client
 from app.services.evaluation_service import store_chat_trace
 from app.services.guardrails_service import (
     apply_context_guardrails,
@@ -22,7 +24,6 @@ settings = get_settings()
 prompts = get_prompts()
 logger = logging.getLogger(__name__)
 
-SEMAPHORE = asyncio.Semaphore(settings.azure_openai.max_concurrency)
 _BACKGROUND_TASKS: set[asyncio.Task] = set()
 _RETRIEVAL_QUERY_MAX_CHARS = 900
 _RETRIEVAL_CONTEXT_MAX_CHARS = 1500
@@ -33,8 +34,12 @@ _RETRIEVAL_EVIDENCE_CONTENT_MAX_CHARS = 700
 
 
 async def _redis_call(method, *args, **kwargs):
-    """Run a blocking Redis operation without blocking the event loop."""
-    return await asyncio.to_thread(method, *args, **kwargs)
+    """Execute a Redis operation using the async client and limiter."""
+    async with dependency_limiter("redis"):
+        result = method(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
 
 
 def _elapsed_ms(started_at: float) -> int:
@@ -156,13 +161,13 @@ async def _record_latency_metrics(started_at: float, outcome: str):
     latency_ms = _elapsed_ms(started_at)
     key = _latency_metrics_key()
     try:
-        await _redis_call(redis_client.hincrby, key, "count", 1)
-        await _redis_call(redis_client.hincrby, key, "total_ms", latency_ms)
-        current_max = await _redis_call(redis_client.hget, key, "max_ms")
+        await _redis_call(async_redis_client.hincrby, key, "count", 1)
+        await _redis_call(async_redis_client.hincrby, key, "total_ms", latency_ms)
+        current_max = await _redis_call(async_redis_client.hget, key, "max_ms")
         if current_max is None or latency_ms > int(current_max):
-            await _redis_call(redis_client.hset, key, "max_ms", latency_ms)
+            await _redis_call(async_redis_client.hset, key, "max_ms", latency_ms)
         await _redis_call(
-            redis_client.hset,
+            async_redis_client.hset,
             key,
             mapping={
                 "last_ms": latency_ms,
@@ -184,12 +189,12 @@ async def _record_pipeline_stage_metrics(
     """Persist stage-level latency metrics for successful full chat pipeline runs."""
     key = _latency_metrics_key()
     try:
-        await _redis_call(redis_client.hincrby, key, "pipeline_count", 1)
-        await _redis_call(redis_client.hincrby, key, "build_context_total_ms", build_context_ms)
-        await _redis_call(redis_client.hincrby, key, "retrieval_total_ms", retrieval_ms)
-        await _redis_call(redis_client.hincrby, key, "model_total_ms", model_ms)
+        await _redis_call(async_redis_client.hincrby, key, "pipeline_count", 1)
+        await _redis_call(async_redis_client.hincrby, key, "build_context_total_ms", build_context_ms)
+        await _redis_call(async_redis_client.hincrby, key, "retrieval_total_ms", retrieval_ms)
+        await _redis_call(async_redis_client.hincrby, key, "model_total_ms", model_ms)
         await _redis_call(
-            redis_client.hset,
+            async_redis_client.hset,
             key,
             mapping={
                 "last_build_context_ms": build_context_ms,
@@ -419,7 +424,7 @@ async def generate_response(user_id: str, user_prompt: str) -> str:
     cached = None
     cache_read_started_at = time.perf_counter()
     try:
-        cached = await _redis_call(redis_client.get, cache_key)
+        cached = await _redis_call(async_redis_client.get, cache_key)
     except RedisError as exc:
         logger.warning("Redis cache read failed. %s", exc)
     finally:
@@ -534,47 +539,46 @@ async def generate_response(user_id: str, user_prompt: str) -> str:
     messages = context_guard["messages"]
 
     model_started_at = time.perf_counter()
-    async with SEMAPHORE:
+    try:
+        response = await _call_primary(messages)
+    except Exception as primary_exc:
+        used_fallback_model = True
+        logger.warning("Primary model failed; attempting fallback. %s", primary_exc)
         try:
-            response = await _call_primary(messages)
-        except Exception as primary_exc:
-            used_fallback_model = True
-            logger.warning("Primary model failed; attempting fallback. %s", primary_exc)
-            try:
-                response = await _call_fallback(messages)
-            except Exception as fallback_exc:
-                logger.exception("Fallback model also failed.")
-                model_ms = _elapsed_ms(model_started_at)
-                await _record_json_metrics(
-                    _build_json_metrics_record(
-                        request_id=request_id,
-                        started_at=started_at,
-                        user_id=user_id,
-                        user_prompt=user_prompt,
-                        safe_user_prompt=safe_user_prompt,
-                        answer="",
-                        outcome="model_error",
-                        build_context_ms=build_context_ms,
-                        retrieval_ms=retrieval_ms,
-                        model_ms=model_ms,
-                        memory_update_ms=memory_update_ms,
-                        cache_read_ms=cache_read_ms,
-                        cache_write_ms=cache_write_ms,
-                        evaluation_trace_ms=evaluation_trace_ms,
-                        retrieval_strategy=retrieval_strategy,
-                        retrieved_count=retrieved_count,
-                        retrieval_evidence=retrieval_evidence,
-                        quality=quality,
-                        llm_usage=llm_usage,
-                        input_guard_reason=input_guard_reason,
-                        context_guard_reason=context_guard_reason,
-                        output_guard_reason=output_guard_reason,
-                        used_fallback_model=used_fallback_model,
-                        error_message=str(fallback_exc),
-                    )
+            response = await _call_fallback(messages)
+        except Exception as fallback_exc:
+            logger.exception("Fallback model also failed.")
+            model_ms = _elapsed_ms(model_started_at)
+            await _record_json_metrics(
+                _build_json_metrics_record(
+                    request_id=request_id,
+                    started_at=started_at,
+                    user_id=user_id,
+                    user_prompt=user_prompt,
+                    safe_user_prompt=safe_user_prompt,
+                    answer="",
+                    outcome="model_error",
+                    build_context_ms=build_context_ms,
+                    retrieval_ms=retrieval_ms,
+                    model_ms=model_ms,
+                    memory_update_ms=memory_update_ms,
+                    cache_read_ms=cache_read_ms,
+                    cache_write_ms=cache_write_ms,
+                    evaluation_trace_ms=evaluation_trace_ms,
+                    retrieval_strategy=retrieval_strategy,
+                    retrieved_count=retrieved_count,
+                    retrieval_evidence=retrieval_evidence,
+                    quality=quality,
+                    llm_usage=llm_usage,
+                    input_guard_reason=input_guard_reason,
+                    context_guard_reason=context_guard_reason,
+                    output_guard_reason=output_guard_reason,
+                    used_fallback_model=used_fallback_model,
+                    error_message=str(fallback_exc),
                 )
-                await _record_latency_metrics(started_at, "model_error")
-                raise
+            )
+            await _record_latency_metrics(started_at, "model_error")
+            raise
     model_ms = _elapsed_ms(model_started_at)
 
     raw_result = response.choices[0].message.content
@@ -611,7 +615,12 @@ async def generate_response(user_id: str, user_prompt: str) -> str:
     # Cache result
     cache_write_started_at = time.perf_counter()
     try:
-        await _redis_call(redis_client.setex, cache_key, settings.memory.redis_ttl_seconds, result)
+        await _redis_call(
+            async_redis_client.setex,
+            cache_key,
+            settings.memory.redis_ttl_seconds,
+            result,
+        )
     except RedisError as exc:
         logger.warning("Redis cache write failed. %s", exc)
     finally:

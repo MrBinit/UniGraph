@@ -1,8 +1,8 @@
-import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-from app.infra.bedrock_client import get_bedrock_runtime_client
+from app.infra.bedrock_client import aconverse
+from app.infra.io_limiters import dependency_limiter
 
 # Previous OpenAI client (kept commented on request):
 # import os
@@ -111,21 +111,15 @@ class _BedrockCompatCompletions:
     ):
         """OpenAI-compatible async chat-completions entrypoint backed by Bedrock Converse."""
         system_blocks, convo_messages = _to_bedrock_payload(messages)
+        payload: dict[str, Any] = {
+            "modelId": model,
+            "messages": convo_messages,
+        }
+        if system_blocks:
+            payload["system"] = system_blocks
 
-        def _invoke():
-            client = get_bedrock_runtime_client()
-            payload: dict[str, Any] = {
-                "modelId": model,
-                "messages": convo_messages,
-            }
-            if system_blocks:
-                payload["system"] = system_blocks
-            return client.converse(**payload)
-
-        if timeout and int(timeout) > 0:
-            response = await asyncio.wait_for(asyncio.to_thread(_invoke), timeout=float(timeout))
-        else:
-            response = await asyncio.to_thread(_invoke)
+        async with dependency_limiter("llm"):
+            response = await aconverse(payload, timeout=timeout)
         return _from_bedrock_response(response)
 
 

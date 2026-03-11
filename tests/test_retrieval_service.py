@@ -43,17 +43,24 @@ def test_retrieve_document_chunks_returns_results_with_timing(monkeypatch):
 
 
 def test_aretrieve_document_chunks_uses_async_wrapper(monkeypatch):
+    async def _fake_aembed_text(_query):
+        return [0.1, 0.2, 0.3]
+
+    monkeypatch.setattr(retrieval_service, "aembed_text", _fake_aembed_text)
     monkeypatch.setattr(
         retrieval_service,
-        "retrieve_document_chunks",
-        lambda query, **kwargs: {
-            "query": query,
-            "top_k": kwargs["top_k"],
-            "retrieval_strategy": "ann",
-            "metadata_filters": kwargs["metadata_filters"] or {},
-            "timings_ms": {"embedding": 1, "database": 2, "total": 3},
-            "results": [],
-        },
+        "resolve_document_chunk_search_strategy",
+        lambda _filters: "ann",
+    )
+
+    async def _fake_search_document_chunks_async(**kwargs):
+        assert kwargs["embedding"] == [0.1, 0.2, 0.3]
+        return []
+
+    monkeypatch.setattr(
+        retrieval_service,
+        "search_document_chunks_async",
+        _fake_search_document_chunks_async,
     )
 
     result = asyncio.run(
@@ -67,3 +74,4 @@ def test_aretrieve_document_chunks_uses_async_wrapper(monkeypatch):
     assert result["query"] == "Find AI labs in Germany"
     assert result["top_k"] == 3
     assert result["metadata_filters"] == {"country": "Germany"}
+    assert result["retrieval_strategy"] == "ann"

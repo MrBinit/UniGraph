@@ -255,6 +255,11 @@ def _apply_env_overrides(data: dict) -> dict:
         "EVALUATION_POLL_SLEEP_SECONDS",
         float,
     )
+    _set(["io", "llm_max_concurrency"], "IO_LLM_MAX_CONCURRENCY", int)
+    _set(["io", "embedding_max_concurrency"], "IO_EMBEDDING_MAX_CONCURRENCY", int)
+    _set(["io", "retrieval_max_concurrency"], "IO_RETRIEVAL_MAX_CONCURRENCY", int)
+    _set(["io", "redis_max_concurrency"], "IO_REDIS_MAX_CONCURRENCY", int)
+    _set(["io", "bedrock_executor_workers"], "IO_BEDROCK_EXECUTOR_WORKERS", int)
 
     return config
 

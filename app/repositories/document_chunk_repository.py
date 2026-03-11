@@ -1,6 +1,6 @@
 import json
 from app.core.config import get_settings
-from app.infra.postgres_client import get_postgres_pool
+from app.infra.postgres_client import get_async_postgres_pool, get_postgres_pool
 
 settings = get_settings()
 
@@ -161,6 +161,83 @@ def _search_document_chunks_filtered_exact(
     return [_row_to_search_result(row) for row in rows]
 
 
+async def _asearch_document_chunks_ann(*, vector_value: str, top_k: int) -> list[dict]:
+    """Run KNN vector search using the pgvector ANN index without metadata filters."""
+    sql = f"""
+        SELECT
+            chunk_id,
+            document_id,
+            chunk_index,
+            source_file,
+            source_path,
+            content,
+            char_count,
+            metadata,
+            embedding <=> %s::vector AS distance
+        FROM {_qualified_chunk_table()}
+        WHERE embedding IS NOT NULL
+        ORDER BY embedding <=> %s::vector
+        LIMIT %s
+    """
+
+    params = (vector_value, vector_value, top_k)
+    pool = get_async_postgres_pool()
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(sql, params)
+            rows = await cur.fetchall()
+
+    return [_row_to_search_result(row) for row in rows]
+
+
+async def _asearch_document_chunks_filtered_exact(
+    *,
+    vector_value: str,
+    top_k: int,
+    metadata_filters: dict[str, str],
+) -> list[dict]:
+    """Filter by metadata first, then rerank the reduced subset by exact vector distance."""
+    sql = f"""
+        WITH filtered_chunks AS MATERIALIZED (
+            SELECT
+                chunk_id,
+                document_id,
+                chunk_index,
+                source_file,
+                source_path,
+                content,
+                char_count,
+                metadata,
+                embedding
+            FROM {_qualified_chunk_table()}
+            WHERE embedding IS NOT NULL
+              AND metadata @> %s::jsonb
+        )
+        SELECT
+            chunk_id,
+            document_id,
+            chunk_index,
+            source_file,
+            source_path,
+            content,
+            char_count,
+            metadata,
+            embedding <=> %s::vector AS distance
+        FROM filtered_chunks
+        ORDER BY embedding <=> %s::vector
+        LIMIT %s
+    """
+
+    params = (json.dumps(metadata_filters), vector_value, vector_value, top_k)
+    pool = get_async_postgres_pool()
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(sql, params)
+            rows = await cur.fetchall()
+
+    return [_row_to_search_result(row) for row in rows]
+
+
 def ensure_document_chunk_table() -> None:
     """Create the retrieval chunk table and indexes if they do not already exist."""
     pool = get_postgres_pool()
@@ -301,3 +378,25 @@ def search_document_chunks(
             metadata_filters=normalized_filters,
         )
     return _search_document_chunks_ann(vector_value=vector_value, top_k=top_k)
+
+
+async def search_document_chunks_async(
+    *,
+    embedding: list[float],
+    limit: int = 5,
+    metadata_filters: dict[str, str] | None = None,
+) -> list[dict]:
+    """Async variant of chunk search using the shared async Postgres connection pool."""
+    if not embedding:
+        raise ValueError("A query embedding is required for document chunk search.")
+
+    top_k = max(1, limit)
+    vector_value = _vector_literal(embedding)
+    normalized_filters = _normalize_metadata_filters(metadata_filters)
+    if normalized_filters:
+        return await _asearch_document_chunks_filtered_exact(
+            vector_value=vector_value,
+            top_k=top_k,
+            metadata_filters=normalized_filters,
+        )
+    return await _asearch_document_chunks_ann(vector_value=vector_value, top_k=top_k)

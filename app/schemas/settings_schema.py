@@ -7,6 +7,7 @@ from app.schemas.circuit_config_schema import CircuitConfig
 from app.schemas.embedding_config_schema import EmbeddingConfig
 from app.schemas.evaluation_runtime_config_schema import EvaluationRuntimeConfig
 from app.schemas.guardrails_config_schema import GuardrailsConfig
+from app.schemas.io_config_schema import IOConfig
 from app.schemas.memory_config_schema import MemoryConfig, UserTokenBudgetConfig
 from app.schemas.middleware_config_schema import MiddlewareConfig
 from app.schemas.postgres_config_schema import PostgresConfig
@@ -27,6 +28,7 @@ class Settings(BaseModel):
     memory: MemoryConfig
     guardrails: GuardrailsConfig
     security: SecurityConfig
+    io: IOConfig
     middleware: MiddlewareConfig
     queue: QueueConfig
 
@@ -39,6 +41,7 @@ __all__ = [
     "EmbeddingConfig",
     "EvaluationRuntimeConfig",
     "GuardrailsConfig",
+    "IOConfig",
     "MemoryConfig",
     "MiddlewareConfig",
     "PostgresConfig",

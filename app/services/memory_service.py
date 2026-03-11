@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import json
 import logging
 from copy import deepcopy
@@ -9,7 +10,8 @@ from app.core.config import get_settings, get_prompts
 from app.core.memory_crypto import decrypt_memory_payload, encrypt_memory_payload
 from app.core.token_utils import count_tokens
 from app.infra.azure_openai_client import client
-from app.infra.redis_client import app_scoped_key, redis_client
+from app.infra.io_limiters import dependency_limiter
+from app.infra.redis_client import app_scoped_key, async_redis_client, redis_client
 from app.services.memory_compaction_service import (
     safe_token_count,
     select_summary_cutoff,
@@ -25,8 +27,19 @@ logger = logging.getLogger(__name__)
 
 
 async def _redis_call(method, *args, **kwargs):
-    """Run a blocking Redis operation without blocking the event loop."""
-    return await asyncio.to_thread(method, *args, **kwargs)
+    """Execute one Redis operation with async/sync compatibility."""
+    async with dependency_limiter("redis"):
+        result = method(*args, **kwargs)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+
+async def _maybe_await(value):
+    """Await a value when awaitable and otherwise return it as-is."""
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 def _redis_key(user_id: str) -> str:
@@ -127,14 +140,14 @@ def _deserialize_memory_payload(raw: str) -> tuple[dict, bool]:
 async def load_memory(user_id: str) -> dict:
     """Load a user's memory from Redis with fallback to the legacy key format."""
     try:
-        raw = await _redis_call(redis_client.get, _redis_key(user_id))
+        raw = await _redis_call(async_redis_client.get, _redis_key(user_id))
     except RedisError as exc:
         logger.warning("Redis memory read failed; using empty memory. %s", exc)
         return _empty_memory()
 
     if not raw:
         try:
-            raw = await _redis_call(redis_client.get, _legacy_redis_key(user_id))
+            raw = await _redis_call(async_redis_client.get, _legacy_redis_key(user_id))
         except RedisError as exc:
             logger.warning("Redis legacy memory read failed; using empty memory. %s", exc)
             return _empty_memory()
@@ -164,8 +177,17 @@ def save_memory(user_id: str, memory: dict):
 
 
 async def save_memory_async(user_id: str, memory: dict):
-    """Persist memory via a worker thread to avoid blocking async callers."""
-    await asyncio.to_thread(save_memory, user_id, memory)
+    """Persist memory asynchronously for async callers."""
+    normalized = _normalize_memory(memory)
+    try:
+        await _redis_call(
+            async_redis_client.setex,
+            _redis_key(user_id),
+            settings.memory.redis_ttl_seconds,
+            _serialize_memory_payload(normalized),
+        )
+    except RedisError as exc:
+        logger.warning("Redis memory write failed; skipping persistence. %s", exc)
 
 
 def save_memory_if_version(user_id: str, expected_version: int, memory: dict) -> tuple[bool, dict]:
@@ -202,6 +224,51 @@ def save_memory_if_version(user_id: str, expected_version: int, memory: dict) ->
         except RedisError as exc:
             logger.warning("Versioned memory save failed for user=%s. %s", user_id, exc)
             return False, _empty_memory()
+
+    return False, _empty_memory()
+
+
+async def save_memory_if_version_async(
+    user_id: str,
+    expected_version: int,
+    memory: dict,
+) -> tuple[bool, dict]:
+    """Async optimistic-write variant used by request-path memory updates."""
+    key = _redis_key(user_id)
+    normalized_target = _normalize_memory(memory)
+
+    for _ in range(3):
+        pipe = async_redis_client.pipeline(transaction=True)
+        try:
+            async with dependency_limiter("redis"):
+                await _maybe_await(pipe.watch(key))
+                current_raw = await _maybe_await(pipe.get(key))
+                if current_raw:
+                    current_memory, ok = _deserialize_memory_payload(current_raw)
+                    if not ok:
+                        current_memory = _empty_memory()
+                else:
+                    current_memory = _empty_memory()
+
+                if current_memory["version"] != expected_version:
+                    await _maybe_await(pipe.unwatch())
+                    return False, current_memory
+
+                pipe.multi()
+                pipe.setex(
+                    key,
+                    settings.memory.redis_ttl_seconds,
+                    _serialize_memory_payload(normalized_target),
+                )
+                await _maybe_await(pipe.execute())
+            return True, normalized_target
+        except WatchError:
+            continue
+        except RedisError as exc:
+            logger.warning("Versioned memory save failed for user=%s. %s", user_id, exc)
+            return False, _empty_memory()
+        finally:
+            await _maybe_await(pipe.reset())
 
     return False, _empty_memory()
 
@@ -336,8 +403,7 @@ async def update_memory(user_id: str, user_message: str, assistant_reply: str):
         candidate["next_seq"] = assistant_seq + 1
         candidate["version"] = expected_version + 1
 
-        updated, _ = await asyncio.to_thread(
-            save_memory_if_version,
+        updated, _ = await save_memory_if_version_async(
             user_id,
             expected_version,
             candidate,

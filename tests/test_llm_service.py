@@ -22,6 +22,11 @@ class FakeRedis:
         self.store[key] = value
 
 
+def _attach_fake_redis(monkeypatch, fake_redis: FakeRedis) -> None:
+    monkeypatch.setattr(llm_service, "redis_client", fake_redis)
+    monkeypatch.setattr(llm_service, "async_redis_client", fake_redis)
+
+
 class _Message:
     def __init__(self, content):
         self.content = content
@@ -42,7 +47,7 @@ async def test_generate_response_returns_cache_hit(monkeypatch):
     fake_redis = FakeRedis()
     cache_key = app_scoped_key("cache", "chat", "user-1", "find ai professor")
     fake_redis.store[cache_key] = "from-cache"
-    monkeypatch.setattr(llm_service, "redis_client", fake_redis)
+    _attach_fake_redis(monkeypatch, fake_redis)
 
     async def should_not_run(*_args, **_kwargs):
         raise AssertionError("build_context should not run on cache hit")
@@ -56,7 +61,7 @@ async def test_generate_response_returns_cache_hit(monkeypatch):
 @pytest.mark.asyncio
 async def test_generate_response_uses_primary_and_updates_memory(monkeypatch):
     fake_redis = FakeRedis()
-    monkeypatch.setattr(llm_service, "redis_client", fake_redis)
+    _attach_fake_redis(monkeypatch, fake_redis)
     captured_metrics = []
 
     async def fake_build_context(user_id, user_prompt):
@@ -118,7 +123,7 @@ async def test_generate_response_uses_primary_and_updates_memory(monkeypatch):
 @pytest.mark.asyncio
 async def test_generate_response_uses_fallback_when_primary_fails(monkeypatch):
     fake_redis = FakeRedis()
-    monkeypatch.setattr(llm_service, "redis_client", fake_redis)
+    _attach_fake_redis(monkeypatch, fake_redis)
 
     async def fake_build_context(_user_id, user_prompt):
         return [{"role": "user", "content": user_prompt}]
@@ -148,7 +153,7 @@ async def test_generate_response_uses_fallback_when_primary_fails(monkeypatch):
 @pytest.mark.asyncio
 async def test_generate_response_raises_when_both_models_fail(monkeypatch):
     fake_redis = FakeRedis()
-    monkeypatch.setattr(llm_service, "redis_client", fake_redis)
+    _attach_fake_redis(monkeypatch, fake_redis)
 
     async def fake_build_context(_user_id, user_prompt):
         return [{"role": "user", "content": user_prompt}]
@@ -174,7 +179,7 @@ async def test_generate_response_raises_when_both_models_fail(monkeypatch):
 @pytest.mark.asyncio
 async def test_generate_response_blocks_on_input_guardrail(monkeypatch):
     fake_redis = FakeRedis()
-    monkeypatch.setattr(llm_service, "redis_client", fake_redis)
+    _attach_fake_redis(monkeypatch, fake_redis)
 
     def fake_input_guard(_user_id, _prompt):
         return {"blocked": True, "sanitized_text": "", "reason": "blocked_input_pattern"}
@@ -192,7 +197,7 @@ async def test_generate_response_blocks_on_input_guardrail(monkeypatch):
 @pytest.mark.asyncio
 async def test_generate_response_injects_chat_system_prompt(monkeypatch):
     fake_redis = FakeRedis()
-    monkeypatch.setattr(llm_service, "redis_client", fake_redis)
+    _attach_fake_redis(monkeypatch, fake_redis)
 
     async def fake_build_context(_user_id, user_prompt):
         return [{"role": "user", "content": user_prompt}]

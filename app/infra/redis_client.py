@@ -2,6 +2,7 @@ import os
 import ssl
 
 import redis
+import redis.asyncio as redis_async
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -38,6 +39,26 @@ def _build_redis_client(config):
     return redis.Redis(**kwargs)
 
 
+def _build_async_redis_client(config):
+    """Create an async Redis client from one role-specific Redis config block."""
+    kwargs = {
+        "host": config.host,
+        "port": config.port,
+        "db": config.db,
+        "decode_responses": True,
+    }
+    if config.username:
+        kwargs["username"] = config.username
+    if config.password:
+        kwargs["password"] = config.password
+    if config.tls:
+        kwargs["ssl"] = True
+        kwargs["ssl_cert_reqs"] = _ssl_cert_reqs(config.ssl_cert_reqs)
+        if config.ssl_ca_certs:
+            kwargs["ssl_ca_certs"] = config.ssl_ca_certs
+    return redis_async.Redis(**kwargs)
+
+
 def _scoped_key(namespace: str, *parts: str) -> str:
     """Join key parts into a normalized Redis key under the given namespace."""
     cleaned = [namespace.strip()]
@@ -62,6 +83,8 @@ def worker_scoped_key(*parts: str) -> str:
 
 app_redis_client = _build_redis_client(settings.redis.app)
 worker_redis_client = _build_redis_client(settings.redis.worker)
+app_async_redis_client = _build_async_redis_client(settings.redis.app)
+worker_async_redis_client = _build_async_redis_client(settings.redis.worker)
 
 
 def _runtime_role() -> str:
@@ -71,3 +94,6 @@ def _runtime_role() -> str:
 
 
 redis_client = worker_redis_client if _runtime_role() == "worker" else app_redis_client
+async_redis_client = (
+    worker_async_redis_client if _runtime_role() == "worker" else app_async_redis_client
+)

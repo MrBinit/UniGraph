@@ -41,6 +41,9 @@ class FakePipeline:
             key, ttl, value = self.pending_setex
             self.redis.setex(key, ttl, value)
 
+    def reset(self):
+        self.pending_setex = None
+
 
 class FakeRedis:
     def __init__(self):
@@ -52,8 +55,13 @@ class FakeRedis:
     def setex(self, key, ttl, value):
         self.store[key] = value
 
-    def pipeline(self):
+    def pipeline(self, *args, **kwargs):
         return FakePipeline(self)
+
+
+def _attach_fake_redis(monkeypatch, fake_redis):
+    monkeypatch.setattr(memory_service, "redis_client", fake_redis)
+    monkeypatch.setattr(memory_service, "async_redis_client", fake_redis)
 
 
 def _memory_key(user_id: str) -> str:
@@ -70,7 +78,8 @@ async def test_load_memory_returns_default_on_redis_error(monkeypatch):
         def get(self, _key):
             raise RedisConnectionError("redis down")
 
-    monkeypatch.setattr(memory_service, "redis_client", FailingRedis())
+    failing = FailingRedis()
+    _attach_fake_redis(monkeypatch, failing)
 
     memory = await memory_service.load_memory("user-1")
     assert memory["summary"] == ""
@@ -81,7 +90,7 @@ async def test_load_memory_returns_default_on_redis_error(monkeypatch):
 @pytest.mark.asyncio
 async def test_build_context_without_prior_memory(monkeypatch):
     fake_redis = FakeRedis()
-    monkeypatch.setattr(memory_service, "redis_client", fake_redis)
+    _attach_fake_redis(monkeypatch, fake_redis)
 
     monkeypatch.setattr(
         memory_service,
@@ -103,7 +112,7 @@ async def test_build_context_without_prior_memory(monkeypatch):
 @pytest.mark.asyncio
 async def test_build_context_enqueues_summary_job(monkeypatch):
     fake_redis = FakeRedis()
-    monkeypatch.setattr(memory_service, "redis_client", fake_redis)
+    _attach_fake_redis(monkeypatch, fake_redis)
 
     existing = {
         "summary": "",
@@ -153,7 +162,7 @@ async def test_build_context_enqueues_summary_job(monkeypatch):
 @pytest.mark.asyncio
 async def test_build_context_does_not_enqueue_when_pending(monkeypatch):
     fake_redis = FakeRedis()
-    monkeypatch.setattr(memory_service, "redis_client", fake_redis)
+    _attach_fake_redis(monkeypatch, fake_redis)
 
     existing = {
         "summary": "",
@@ -195,7 +204,7 @@ async def test_build_context_does_not_enqueue_when_pending(monkeypatch):
 @pytest.mark.asyncio
 async def test_update_memory_appends_messages_with_seq(monkeypatch):
     fake_redis = FakeRedis()
-    monkeypatch.setattr(memory_service, "redis_client", fake_redis)
+    _attach_fake_redis(monkeypatch, fake_redis)
 
     existing = {
         "summary": "",
@@ -241,7 +250,7 @@ def test_get_user_budget_uses_override():
 
 def test_save_memory_if_version_rejects_mismatch(monkeypatch):
     fake_redis = FakeRedis()
-    monkeypatch.setattr(memory_service, "redis_client", fake_redis)
+    _attach_fake_redis(monkeypatch, fake_redis)
 
     existing = {
         "summary": "",
@@ -294,7 +303,7 @@ async def test_update_memory_retries_on_version_conflict(monkeypatch):
         load_calls["count"] += 1
         return deepcopy(load_snapshots[index])
 
-    def fake_save_memory_if_version(_user_id, expected_version, memory):
+    async def fake_save_memory_if_version_async(_user_id, expected_version, memory):
         save_calls["count"] += 1
         if save_calls["count"] == 1:
             assert expected_version == 2
@@ -304,7 +313,11 @@ async def test_update_memory_retries_on_version_conflict(monkeypatch):
         return True, memory
 
     monkeypatch.setattr(memory_service, "load_memory", fake_load_memory)
-    monkeypatch.setattr(memory_service, "save_memory_if_version", fake_save_memory_if_version)
+    monkeypatch.setattr(
+        memory_service,
+        "save_memory_if_version_async",
+        fake_save_memory_if_version_async,
+    )
 
     await memory_service.update_memory("user-1", "hello", "hi there")
 
@@ -330,11 +343,15 @@ async def test_update_memory_raises_after_retry_exhaustion(monkeypatch):
             "last_summary_job_id": "",
         }
 
-    def fake_save_memory_if_version(_user_id, _expected_version, _memory):
+    async def fake_save_memory_if_version_async(_user_id, _expected_version, _memory):
         return False, {"version": 999}
 
     monkeypatch.setattr(memory_service, "load_memory", fake_load_memory)
-    monkeypatch.setattr(memory_service, "save_memory_if_version", fake_save_memory_if_version)
+    monkeypatch.setattr(
+        memory_service,
+        "save_memory_if_version_async",
+        fake_save_memory_if_version_async,
+    )
 
     with pytest.raises(RuntimeError):
         await memory_service.update_memory("user-1", "hello", "hi there")

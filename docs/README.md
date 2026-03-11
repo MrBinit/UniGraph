@@ -12,6 +12,7 @@ Files in this folder:
 - `short-term-memory.md`: short-term memory lifecycle, compaction, summarization, and async updates.
 - `long-term-memory.md`: long-term retrieval architecture, pgvector experiments, and HNSW rationale.
 - `redis.md`: Redis topology, namespaces, clients, key patterns, and queue usage.
+- `async-io-path.md`: hot-path async I/O architecture, dependency limiters, async Redis/Postgres, and Bedrock executor isolation.
 - `ops.md`: operational status endpoint and the metrics it exposes.
 - `evaluation-pipeline.md`: end-to-end offline evaluation architecture (evidence capture, judge prompts, scoring, storage, reports).
 - `async-chat-sqs.md`: async chat queue architecture (SQS enqueue, worker consumption, DynamoDB result store, APIs).
@@ -28,6 +29,7 @@ Recommended reading order:
 6. `long-term-memory.md`
 7. `redis.md`
 8. `ops.md`
-9. `evaluation-pipeline.md`
-10. `system-overview.md`
-11. `strategy.md`
+9. `async-io-path.md`
+10. `evaluation-pipeline.md`
+11. `system-overview.md`
+12. `strategy.md`

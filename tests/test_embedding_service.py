@@ -128,11 +128,19 @@ def test_embed_chunk_manifest_writes_embedding_output(tmp_path: Path, monkeypatc
 
 
 def test_aembed_text_uses_async_wrapper(monkeypatch):
-    monkeypatch.setattr(embedding_service, "embed_text", lambda text: [9.0, 8.0, 7.0])
+    fake_redis = _FakeRedis()
+    monkeypatch.setattr(embedding_service, "async_redis_client", fake_redis)
+
+    async def _fake_ainvoke_model_json(_payload, timeout=None):
+        assert timeout == embedding_service.settings.azure_openai.timeout
+        return {"embedding": [9.0, 8.0, 7.0]}
+
+    monkeypatch.setattr(embedding_service, "ainvoke_model_json", _fake_ainvoke_model_json)
 
     vector = asyncio.run(embedding_service.aembed_text("async test"))
 
     assert vector == [9.0, 8.0, 7.0]
+    assert len(fake_redis.setex_calls) == 1
 
 
 def test_aembed_chunk_manifest_writes_embedding_output(tmp_path: Path, monkeypatch):

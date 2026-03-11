@@ -195,7 +195,9 @@ def test_api_to_queue_to_worker_to_memory_update(monkeypatch):
     fake_redis = FakeRedis()
 
     monkeypatch.setattr(llm_service, "redis_client", fake_redis)
+    monkeypatch.setattr(llm_service, "async_redis_client", fake_redis)
     monkeypatch.setattr(memory_service, "redis_client", fake_redis)
+    monkeypatch.setattr(memory_service, "async_redis_client", fake_redis)
     monkeypatch.setattr(memory_metrics_service, "redis_client", fake_redis)
     monkeypatch.setattr(ops_status_service, "app_redis_client", fake_redis)
     monkeypatch.setattr(summary_queue_service, "app_redis_client", fake_redis)
