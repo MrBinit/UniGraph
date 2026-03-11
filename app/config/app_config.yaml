@@ -1,5 +1,5 @@
 app:
-  name: "azure-openai-app"
+  name: "unigraph-bedrock-app"
   log_level: "INFO"
   docs_enabled: false
   metrics_json_enabled: true

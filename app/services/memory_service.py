@@ -8,7 +8,7 @@ from redis.exceptions import RedisError, WatchError
 from app.core.config import get_settings, get_prompts
 from app.core.memory_crypto import decrypt_memory_payload, encrypt_memory_payload
 from app.core.token_utils import count_tokens
-from app.infra.azure_openai_client import client
+from app.infra.bedrock_chat_client import client
 from app.infra.io_limiters import dependency_limiter
 from app.infra.redis_client import app_scoped_key, async_redis_client, redis_client
 from app.services.memory_compaction_service import (
@@ -278,7 +278,7 @@ async def summarize_messages(messages: list) -> str:
         return ""
 
     response = await client.chat.completions.create(
-        model=settings.azure_openai.primary_deployment,
+        model=settings.bedrock.primary_model_id,
         messages=[
             {
                 "role": "system",
@@ -289,7 +289,7 @@ async def summarize_messages(messages: list) -> str:
                 "content": json.dumps(messages),
             },
         ],
-        timeout=settings.azure_openai.timeout,
+        timeout=settings.bedrock.timeout,
     )
 
     content = response.choices[0].message.content

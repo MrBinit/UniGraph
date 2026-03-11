@@ -67,7 +67,7 @@ Secrets Manager option:
 - Set:
   - `AWS_SECRETS_MANAGER_SECRET_ID=unigraph/prod/app`
   - `AWS_SECRETS_MANAGER_REGION=us-east-1` (optional if region is already configured)
-- Secret value must be JSON object keys matching expected env names (for example `AZURE_OPENAI_API_KEY`, `POSTGRES_PASSWORD`, `SECURITY_JWT_SECRET`, `MEMORY_ENCRYPTION_KEY`).
+- Secret value must be JSON object keys matching expected env names (for example `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `POSTGRES_PASSWORD`, `SECURITY_JWT_SECRET`, `MEMORY_ENCRYPTION_KEY`, `BEDROCK_TIMEOUT`).
 - App startup loads that secret once and maps keys into environment only when those env vars are not already set.
 
 Metrics JSON notes:

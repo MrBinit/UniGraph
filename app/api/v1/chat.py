@@ -1,7 +1,7 @@
 import asyncio
-
+import json
 from fastapi import APIRouter, Depends, HTTPException, status
-
+from fastapi.responses import StreamingResponse
 from app.api.dependencies.security import authorize_user_access, get_current_principal
 from app.schemas.auth_schema import Principal
 from app.schemas.chat_schema import (
@@ -10,6 +10,7 @@ from app.schemas.chat_schema import (
     ChatRequest,
 )
 from app.services.llm_async_queue_service import enqueue_chat_job, get_chat_job
+from app.services.llm_service import generate_response_stream
 
 router = APIRouter()
 
@@ -43,6 +44,34 @@ async def chat(
             detail=f"Failed to enqueue async chat job: {exc}",
         ) from exc
     return AsyncChatEnqueueResponse(**job)
+
+
+@router.post("/chat/stream")
+async def chat_stream(
+    request: ChatRequest,
+    principal: Principal = Depends(get_current_principal),
+):
+    """Stream one chat completion over Server-Sent Events."""
+    authorize_user_access(principal, request.user_id)
+
+    async def _event_stream():
+        try:
+            async for partial in generate_response_stream(request.user_id, request.prompt):
+                chunk = {"type": "chunk", "text": str(partial)}
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            yield 'data: {"type":"done"}\n\n'
+        except Exception as exc:
+            payload = {"type": "error", "detail": str(exc)}
+            yield f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/chat/{job_id}", response_model=AsyncChatStatusResponse)

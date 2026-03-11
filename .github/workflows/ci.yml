@@ -19,7 +19,6 @@ env:
   SECURITY_JWT_SECRET: "ci_jwt_secret_abcdefghijklmnopqrstuvwxyz123456"
   MEMORY_ENCRYPTION_KEY: "ci_memory_secret_abcdefghijklmnopqrstuvwxyz123"
   POSTGRES_PASSWORD: "ci_pg_password"
-  AZURE_OPENAI_API_KEY: "ci_dummy_key"
   MIDDLEWARE_ENABLE_TIMEOUT: "false"
   MIDDLEWARE_ENABLE_DISTRIBUTED_RATE_LIMIT: "false"
   MIDDLEWARE_ENABLE_DISTRIBUTED_BACKPRESSURE: "false"
@@ -27,7 +26,7 @@ env:
   AWS_ACCESS_KEY_ID: "ci_dummy_access_key"
   AWS_SECRET_ACCESS_KEY: "ci_dummy_secret_key"
   AWS_DEFAULT_REGION: "us-east-1"
-  AZURE_OPENAI_TIMEOUT: "5"
+  BEDROCK_TIMEOUT: "5"
   POSTGRES_CONNECT_TIMEOUT_SECONDS: "2"
 
 jobs:

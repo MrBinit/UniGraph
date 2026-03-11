@@ -121,6 +121,43 @@ def test_chat_async_status_requires_owner(monkeypatch):
     assert response.status_code == 403
 
 
+def test_chat_stream_endpoint_success(monkeypatch):
+    async def fake_generate_response_stream(user_id: str, prompt: str):
+        assert user_id == "user-1"
+        assert prompt == "hello stream"
+        yield "hel"
+        yield "hello"
+
+    monkeypatch.setattr(chat_api, "generate_response_stream", fake_generate_response_stream)
+
+    token = create_access_token(user_id="user-1", roles=["user"])
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/chat/stream",
+        json={"user_id": "user-1", "prompt": "hello stream"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    body = response.text
+    assert '"type": "chunk"' in body
+    assert '"text": "hel"' in body
+    assert '"text": "hello"' in body
+    assert '{"type":"done"}' in body
+
+
+def test_chat_stream_endpoint_forbidden_for_different_user():
+    token = create_access_token(user_id="user-a", roles=["user"])
+    client = TestClient(app)
+    response = client.post(
+        "/api/v1/chat/stream",
+        json={"user_id": "user-b", "prompt": "hello"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 403
+
+
 def test_route_matching_middleware_formats_404():
     client = TestClient(app)
     response = client.get("/api/v1/does-not-exist")

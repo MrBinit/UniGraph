@@ -1,0 +1,6 @@
+# Bedrock generation configuration.
+bedrock:
+  primary_model_id: "us.anthropic.claude-3-5-sonnet-20240620-v1:0"
+  fallback_model_id: "us.anthropic.claude-3-haiku-20240307-v1:0"
+  timeout: 30
+  max_concurrency: 50

@@ -31,6 +31,14 @@ class _FakeBedrockRuntimeClient:
     def invoke_model(self, **_payload):
         return {"body": BytesIO(json.dumps({"embedding": [0.1, 0.2]}).encode("utf-8"))}
 
+    def converse_stream(self, **_payload):
+        return {
+            "stream": [
+                {"contentBlockDelta": {"delta": {"text": "hel"}}},
+                {"contentBlockDelta": {"delta": {"text": "lo"}}},
+            ]
+        }
+
 
 async def _run_inline(fn, *, timeout=None):  # noqa: ARG001
     return fn()
@@ -91,3 +99,24 @@ def test_ainvoke_model_json_propagates_open_circuit(monkeypatch):
     }
     with pytest.raises(CircuitBreakerError):
         asyncio.run(bedrock_client.ainvoke_model_json(payload, timeout=4))
+
+
+def test_aconverse_stream_text_yields_deltas(monkeypatch):
+    fake_breaker = _FakeBreaker()
+    fake_client = _FakeBedrockRuntimeClient()
+    monkeypatch.setattr(bedrock_client, "get_bedrock_runtime_client", lambda: fake_client)
+    monkeypatch.setattr(bedrock_client, "get_llm_breaker", lambda _model_id: fake_breaker)
+
+    async def _collect():
+        chunks = []
+        payload = {
+            "modelId": "test-model",
+            "messages": [{"role": "user", "content": [{"text": "hi"}]}],
+        }
+        async for delta in bedrock_client.aconverse_stream_text(payload):
+            chunks.append(delta)
+        return chunks
+
+    chunks = asyncio.run(_collect())
+    assert chunks == ["hel", "lo"]
+    assert len(fake_breaker.calls) == 1

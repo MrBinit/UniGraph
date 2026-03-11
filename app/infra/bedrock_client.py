@@ -1,7 +1,7 @@
 import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, AsyncIterator
 
 import boto3
 
@@ -80,3 +80,77 @@ async def ainvoke_model_json(
         return payload_obj
 
     return await _run_in_bedrock_executor(_invoke_and_decode, timeout=timeout)
+
+
+def _parse_converse_stream_event(event: dict[str, Any]) -> tuple[str, Exception | None]:
+    """Extract text deltas or service-side stream errors from one ConverseStream event."""
+    if not isinstance(event, dict):
+        return "", None
+
+    content_delta = event.get("contentBlockDelta")
+    if isinstance(content_delta, dict):
+        delta_payload = content_delta.get("delta")
+        if isinstance(delta_payload, dict):
+            delta_text = delta_payload.get("text")
+            if isinstance(delta_text, str) and delta_text:
+                return delta_text, None
+
+    error_keys = (
+        "internalServerException",
+        "modelStreamErrorException",
+        "validationException",
+        "throttlingException",
+        "serviceUnavailableException",
+    )
+    for key in error_keys:
+        if key not in event:
+            continue
+        raw = event.get(key)
+        if isinstance(raw, dict):
+            message = str(raw.get("message") or raw)
+        else:
+            message = str(raw)
+        return "", RuntimeError(f"Bedrock stream error ({key}): {message}")
+    return "", None
+
+
+async def aconverse_stream_text(
+    payload: dict[str, Any],
+    *,
+    timeout: int | None = None,  # noqa: ARG001 - reserved for future stream timeout control
+) -> AsyncIterator[str]:
+    """Yield incremental text deltas from Bedrock ConverseStream."""
+    del timeout
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    sentinel = object()
+
+    def _produce():
+        try:
+            client = get_bedrock_runtime_client()
+            model_id = str(payload.get("modelId", "")).strip() or "default"
+            response = get_llm_breaker(model_id).call(client.converse_stream, **payload)
+            stream = response.get("stream", [])
+            for event in stream:
+                text, stream_error = _parse_converse_stream_event(event)
+                if stream_error is not None:
+                    loop.call_soon_threadsafe(queue.put_nowait, stream_error)
+                    return
+                if text:
+                    loop.call_soon_threadsafe(queue.put_nowait, text)
+        except Exception as exc:
+            loop.call_soon_threadsafe(queue.put_nowait, exc)
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, sentinel)
+
+    producer_task = loop.run_in_executor(_BEDROCK_EXECUTOR, _produce)
+    try:
+        while True:
+            item = await queue.get()
+            if item is sentinel:
+                break
+            if isinstance(item, Exception):
+                raise item
+            yield str(item)
+    finally:
+        await producer_task

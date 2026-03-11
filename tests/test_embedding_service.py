@@ -161,7 +161,7 @@ def test_aembed_text_uses_async_wrapper(monkeypatch):
     monkeypatch.setattr(embedding_service, "async_redis_client", fake_redis)
 
     async def _fake_ainvoke_model_json(_payload, timeout=None):
-        assert timeout == embedding_service.settings.azure_openai.timeout
+        assert timeout == embedding_service.settings.bedrock.timeout
         return {"embedding": [9.0, 8.0, 7.0]}
 
     monkeypatch.setattr(embedding_service, "ainvoke_model_json", _fake_ainvoke_model_json)

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 import boto3
 from boto3.dynamodb.types import TypeDeserializer
 from app.core.config import get_evaluation_prompts, get_settings
-from app.infra.azure_openai_client import client
+from app.infra.bedrock_chat_client import client
 
 settings = get_settings()
 evaluation_prompts = get_evaluation_prompts()
@@ -166,7 +166,7 @@ async def _evaluate_one(record: dict) -> dict:
         response = await client.chat.completions.create(
             model=settings.evaluation.judge_model_id,
             messages=_judge_prompt(system_prompt, payload),
-            timeout=settings.azure_openai.timeout,
+            timeout=settings.bedrock.timeout,
         )
         content = response.choices[0].message.content if response.choices else ""
         judged = _extract_json_block(content)

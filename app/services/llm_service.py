@@ -6,7 +6,7 @@ from typing import AsyncIterator
 from uuid import uuid4
 from redis.exceptions import RedisError
 from app.core.config import get_prompts, get_settings
-from app.infra.azure_openai_client import client
+from app.infra.bedrock_chat_client import client
 from app.infra.io_limiters import dependency_limiter
 from app.infra.redis_client import app_scoped_key, async_redis_client, redis_client
 from app.services.evaluation_service import store_chat_trace
@@ -144,8 +144,8 @@ def _build_json_metrics_record(
         "model": {
             "provider": "amazon_bedrock",
             "used_fallback": used_fallback_model,
-            "primary_deployment": settings.azure_openai.primary_deployment,
-            "fallback_deployment": settings.azure_openai.fallback_deployment,
+            "primary_model_id": settings.bedrock.primary_model_id,
+            "fallback_model_id": settings.bedrock.fallback_model_id,
         },
         "error": error_message,
     }
@@ -340,21 +340,41 @@ async def _persist_evaluation_trace(
 
 
 async def _call_primary(messages: list):
-    """Send the request to the primary Azure OpenAI deployment."""
+    """Send the request to the primary Bedrock model."""
     return await client.chat.completions.create(
-        model=settings.azure_openai.primary_deployment,
+        model=settings.bedrock.primary_model_id,
         messages=messages,
-        timeout=settings.azure_openai.timeout,
+        timeout=settings.bedrock.timeout,
     )
 
 
 async def _call_fallback(messages: list):
-    """Send the request to the fallback Azure OpenAI deployment."""
+    """Send the request to the fallback Bedrock model."""
     return await client.chat.completions.create(
-        model=settings.azure_openai.fallback_deployment,
+        model=settings.bedrock.fallback_model_id,
         messages=messages,
-        timeout=settings.azure_openai.timeout,
+        timeout=settings.bedrock.timeout,
     )
+
+
+async def _stream_primary(messages: list) -> AsyncIterator[str]:
+    """Stream token deltas from the primary deployment."""
+    async for delta in client.chat.completions.stream(
+        model=settings.bedrock.primary_model_id,
+        messages=messages,
+        timeout=settings.bedrock.timeout,
+    ):
+        yield delta
+
+
+async def _stream_fallback(messages: list) -> AsyncIterator[str]:
+    """Stream token deltas from the fallback deployment."""
+    async for delta in client.chat.completions.stream(
+        model=settings.bedrock.fallback_model_id,
+        messages=messages,
+        timeout=settings.bedrock.timeout,
+    ):
+        yield delta
 
 
 async def generate_response(user_id: str, user_prompt: str) -> str:
@@ -707,20 +727,372 @@ async def generate_response_stream(
     chunk_size: int = 120,
     chunk_delay_ms: int = 12,
 ) -> AsyncIterator[str]:
-    """Yield a progressively growing answer string for Gradio streaming UX.
+    """Stream true model output from Bedrock and yield progressively assembled text."""
 
-    This streams the already-validated final answer text in chunks so guardrail,
-    memory, cache, and metrics behavior remains identical to `generate_response`.
-    """
-    result = await generate_response(user_id, user_prompt)
-    if not isinstance(result, str):
-        result = str(result)
+    async def _yield_assembled(delta_stream: AsyncIterator[str]) -> AsyncIterator[str]:
+        assembled = ""
+        size = max(1, int(chunk_size))
+        delay_seconds = max(0.0, float(chunk_delay_ms) / 1000.0)
+        async for delta in delta_stream:
+            text = str(delta or "")
+            if not text:
+                continue
+            for start in range(0, len(text), size):
+                piece = text[start : start + size]
+                if not piece:
+                    continue
+                assembled += piece
+                yield assembled
+                if delay_seconds > 0:
+                    await asyncio.sleep(delay_seconds)
 
-    size = max(1, int(chunk_size))
-    delay_seconds = max(0.0, float(chunk_delay_ms) / 1000.0)
-    assembled = ""
-    for start in range(0, len(result), size):
-        assembled += result[start : start + size]
-        yield assembled
-        if delay_seconds > 0:
-            await asyncio.sleep(delay_seconds)
+    started_at = time.perf_counter()
+    request_id = uuid4().hex
+    safe_user_prompt = user_prompt
+    build_context_ms: int | None = None
+    retrieval_ms: int | None = None
+    model_ms: int | None = None
+    memory_update_ms: int | None = None
+    cache_read_ms: int | None = None
+    cache_write_ms: int | None = None
+    evaluation_trace_ms: int | None = None
+    retrieval_strategy = "none"
+    retrieved_count = 0
+    retrieved_results: list[dict] = []
+    retrieval_evidence: list[dict] = []
+    llm_usage: dict = {}
+    quality: dict = {}
+    input_guard_reason = ""
+    context_guard_reason = ""
+    output_guard_reason = ""
+    used_fallback_model = False
+
+    input_guard = guard_user_input(user_id, user_prompt)
+    if input_guard["blocked"]:
+        input_guard_reason = str(input_guard.get("reason", "blocked_input"))
+        refusal = refusal_response()
+        logger.info(
+            "GuardrailDecision | stage=input | user=%s | blocked=true | reason=%s",
+            user_id,
+            input_guard_reason,
+        )
+        await _record_json_metrics(
+            _build_json_metrics_record(
+                request_id=request_id,
+                started_at=started_at,
+                user_id=user_id,
+                user_prompt=user_prompt,
+                safe_user_prompt=safe_user_prompt,
+                answer=refusal,
+                outcome="blocked_input",
+                build_context_ms=build_context_ms,
+                retrieval_ms=retrieval_ms,
+                model_ms=model_ms,
+                memory_update_ms=memory_update_ms,
+                cache_read_ms=cache_read_ms,
+                cache_write_ms=cache_write_ms,
+                evaluation_trace_ms=evaluation_trace_ms,
+                retrieval_strategy=retrieval_strategy,
+                retrieved_count=retrieved_count,
+                retrieval_evidence=retrieval_evidence,
+                quality=quality,
+                llm_usage=llm_usage,
+                input_guard_reason=input_guard_reason,
+                context_guard_reason=context_guard_reason,
+                output_guard_reason=output_guard_reason,
+                used_fallback_model=used_fallback_model,
+            )
+        )
+        await _record_latency_metrics(started_at, "blocked_input")
+        yield refusal
+        return
+
+    safe_user_prompt = str(input_guard.get("sanitized_text", user_prompt))
+    cache_key = app_scoped_key("cache", "chat", user_id, safe_user_prompt)
+
+    cached = None
+    cache_read_started_at = time.perf_counter()
+    try:
+        cached = await _redis_call(async_redis_client.get, cache_key)
+    except RedisError as exc:
+        logger.warning("Redis cache read failed. %s", exc)
+    finally:
+        cache_read_ms = _elapsed_ms(cache_read_started_at)
+
+    if cached:
+        cached_text = str(cached)
+        await _record_json_metrics(
+            _build_json_metrics_record(
+                request_id=request_id,
+                started_at=started_at,
+                user_id=user_id,
+                user_prompt=user_prompt,
+                safe_user_prompt=safe_user_prompt,
+                answer=cached_text,
+                outcome="cache_hit",
+                build_context_ms=build_context_ms,
+                retrieval_ms=retrieval_ms,
+                model_ms=model_ms,
+                memory_update_ms=memory_update_ms,
+                cache_read_ms=cache_read_ms,
+                cache_write_ms=cache_write_ms,
+                evaluation_trace_ms=evaluation_trace_ms,
+                retrieval_strategy=retrieval_strategy,
+                retrieved_count=retrieved_count,
+                retrieval_evidence=retrieval_evidence,
+                quality=quality,
+                llm_usage=llm_usage,
+                input_guard_reason=input_guard_reason,
+                context_guard_reason=context_guard_reason,
+                output_guard_reason=output_guard_reason,
+                used_fallback_model=used_fallback_model,
+            )
+        )
+        await _record_latency_metrics(started_at, "cache_hit")
+        yield cached_text
+        return
+
+    build_context_started_at = time.perf_counter()
+    messages = await build_context(user_id, safe_user_prompt)
+    build_context_ms = _elapsed_ms(build_context_started_at)
+
+    retrieval_query = _build_retrieval_query(messages)
+    if retrieval_query:
+        retrieval_started_at = time.perf_counter()
+        try:
+            retrieval_result = await aretrieve_document_chunks(
+                retrieval_query,
+                top_k=settings.postgres.default_top_k,
+            )
+            retrieval_strategy = str(retrieval_result.get("retrieval_strategy", "unknown"))
+            results = retrieval_result.get("results", [])
+            if isinstance(results, list):
+                retrieved_results = results
+                retrieved_count = len(results)
+                retrieval_evidence = _build_retrieval_evidence(results)
+            retrieval_message = _format_retrieval_context(retrieval_result)
+            if retrieval_message:
+                messages = [retrieval_message] + messages
+        except Exception as exc:
+            retrieval_strategy = "error"
+            logger.warning(
+                "Long-term retrieval failed; continuing without retrieved context. %s",
+                exc,
+            )
+        finally:
+            retrieval_ms = _elapsed_ms(retrieval_started_at)
+    else:
+        retrieval_ms = 0
+
+    chat_system_prompt = prompts.get("chat", {}).get("system_prompt", "")
+    if isinstance(chat_system_prompt, str) and chat_system_prompt.strip():
+        messages = [{"role": "system", "content": chat_system_prompt.strip()}] + messages
+
+    context_guard = apply_context_guardrails(messages)
+    if context_guard["blocked"]:
+        context_guard_reason = str(context_guard.get("reason", "blocked_context"))
+        refusal = refusal_response()
+        logger.info(
+            "GuardrailDecision | stage=context | user=%s | blocked=true | reason=%s",
+            user_id,
+            context_guard_reason,
+        )
+        await _record_json_metrics(
+            _build_json_metrics_record(
+                request_id=request_id,
+                started_at=started_at,
+                user_id=user_id,
+                user_prompt=user_prompt,
+                safe_user_prompt=safe_user_prompt,
+                answer=refusal,
+                outcome="blocked_context",
+                build_context_ms=build_context_ms,
+                retrieval_ms=retrieval_ms,
+                model_ms=model_ms,
+                memory_update_ms=memory_update_ms,
+                cache_read_ms=cache_read_ms,
+                cache_write_ms=cache_write_ms,
+                evaluation_trace_ms=evaluation_trace_ms,
+                retrieval_strategy=retrieval_strategy,
+                retrieved_count=retrieved_count,
+                retrieval_evidence=retrieval_evidence,
+                quality=quality,
+                llm_usage=llm_usage,
+                input_guard_reason=input_guard_reason,
+                context_guard_reason=context_guard_reason,
+                output_guard_reason=output_guard_reason,
+                used_fallback_model=used_fallback_model,
+            )
+        )
+        await _record_latency_metrics(started_at, "blocked_context")
+        yield refusal
+        return
+    messages = context_guard["messages"]
+
+    streamed_text = ""
+    model_started_at = time.perf_counter()
+    try:
+        async for partial in _yield_assembled(_stream_primary(messages)):
+            streamed_text = partial
+            yield partial
+    except Exception as primary_exc:
+        used_fallback_model = True
+        logger.warning("Primary model stream failed; attempting fallback. %s", primary_exc)
+        if streamed_text:
+            model_ms = _elapsed_ms(model_started_at)
+            await _record_json_metrics(
+                _build_json_metrics_record(
+                    request_id=request_id,
+                    started_at=started_at,
+                    user_id=user_id,
+                    user_prompt=user_prompt,
+                    safe_user_prompt=safe_user_prompt,
+                    answer=streamed_text,
+                    outcome="model_error",
+                    build_context_ms=build_context_ms,
+                    retrieval_ms=retrieval_ms,
+                    model_ms=model_ms,
+                    memory_update_ms=memory_update_ms,
+                    cache_read_ms=cache_read_ms,
+                    cache_write_ms=cache_write_ms,
+                    evaluation_trace_ms=evaluation_trace_ms,
+                    retrieval_strategy=retrieval_strategy,
+                    retrieved_count=retrieved_count,
+                    retrieval_evidence=retrieval_evidence,
+                    quality=quality,
+                    llm_usage=llm_usage,
+                    input_guard_reason=input_guard_reason,
+                    context_guard_reason=context_guard_reason,
+                    output_guard_reason=output_guard_reason,
+                    used_fallback_model=used_fallback_model,
+                    error_message=str(primary_exc),
+                )
+            )
+            await _record_latency_metrics(started_at, "model_error")
+            raise
+        try:
+            async for partial in _yield_assembled(_stream_fallback(messages)):
+                streamed_text = partial
+                yield partial
+        except Exception as fallback_exc:
+            logger.exception("Fallback model stream also failed.")
+            model_ms = _elapsed_ms(model_started_at)
+            await _record_json_metrics(
+                _build_json_metrics_record(
+                    request_id=request_id,
+                    started_at=started_at,
+                    user_id=user_id,
+                    user_prompt=user_prompt,
+                    safe_user_prompt=safe_user_prompt,
+                    answer=streamed_text,
+                    outcome="model_error",
+                    build_context_ms=build_context_ms,
+                    retrieval_ms=retrieval_ms,
+                    model_ms=model_ms,
+                    memory_update_ms=memory_update_ms,
+                    cache_read_ms=cache_read_ms,
+                    cache_write_ms=cache_write_ms,
+                    evaluation_trace_ms=evaluation_trace_ms,
+                    retrieval_strategy=retrieval_strategy,
+                    retrieved_count=retrieved_count,
+                    retrieval_evidence=retrieval_evidence,
+                    quality=quality,
+                    llm_usage=llm_usage,
+                    input_guard_reason=input_guard_reason,
+                    context_guard_reason=context_guard_reason,
+                    output_guard_reason=output_guard_reason,
+                    used_fallback_model=used_fallback_model,
+                    error_message=str(fallback_exc),
+                )
+            )
+            await _record_latency_metrics(started_at, "model_error")
+            raise
+    model_ms = _elapsed_ms(model_started_at)
+
+    guarded_output = guard_model_output(streamed_text)
+    result = guarded_output["text"]
+    if guarded_output["blocked"]:
+        output_guard_reason = str(guarded_output.get("reason", "blocked_output"))
+        logger.info(
+            "GuardrailDecision | stage=output | user=%s | blocked=true | reason=%s",
+            user_id,
+            output_guard_reason,
+        )
+    if result != streamed_text:
+        yield result
+
+    memory_update_started_at = time.perf_counter()
+    try:
+        await update_memory(user_id, safe_user_prompt, result)
+    except Exception as exc:
+        logger.warning("Memory update failed. %s", exc)
+    finally:
+        memory_update_ms = _elapsed_ms(memory_update_started_at)
+
+    cache_write_started_at = time.perf_counter()
+    try:
+        await _redis_call(
+            async_redis_client.setex,
+            cache_key,
+            settings.memory.redis_ttl_seconds,
+            result,
+        )
+    except RedisError as exc:
+        logger.warning("Redis cache write failed. %s", exc)
+    finally:
+        cache_write_ms = _elapsed_ms(cache_write_started_at)
+
+    evaluation_trace_started_at = time.perf_counter()
+    _track_background_task(
+        asyncio.create_task(
+            _persist_evaluation_trace(
+                user_id=user_id,
+                prompt=user_prompt,
+                answer=result,
+                retrieved_results=retrieved_results,
+                retrieval_strategy=retrieval_strategy,
+                build_context_ms=build_context_ms or 0,
+                retrieval_ms=retrieval_ms or 0,
+                model_ms=model_ms or 0,
+            )
+        ),
+        label="Evaluation trace persistence",
+    )
+    evaluation_trace_ms = _elapsed_ms(evaluation_trace_started_at)
+
+    quality = {}
+    await _record_pipeline_stage_metrics(
+        build_context_ms=build_context_ms or 0,
+        retrieval_ms=retrieval_ms or 0,
+        model_ms=model_ms or 0,
+        retrieval_strategy=retrieval_strategy,
+        retrieved_count=retrieved_count,
+    )
+    await _record_json_metrics(
+        _build_json_metrics_record(
+            request_id=request_id,
+            started_at=started_at,
+            user_id=user_id,
+            user_prompt=user_prompt,
+            safe_user_prompt=safe_user_prompt,
+            answer=result,
+            outcome="success",
+            build_context_ms=build_context_ms,
+            retrieval_ms=retrieval_ms,
+            model_ms=model_ms,
+            memory_update_ms=memory_update_ms,
+            cache_read_ms=cache_read_ms,
+            cache_write_ms=cache_write_ms,
+            evaluation_trace_ms=evaluation_trace_ms,
+            retrieval_strategy=retrieval_strategy,
+            retrieved_count=retrieved_count,
+            retrieval_evidence=retrieval_evidence,
+            quality=quality,
+            llm_usage=llm_usage,
+            input_guard_reason=input_guard_reason,
+            context_guard_reason=context_guard_reason,
+            output_guard_reason=output_guard_reason,
+            used_fallback_model=used_fallback_model,
+        )
+    )
+    await _record_latency_metrics(started_at, "success")

@@ -125,12 +125,15 @@ def _apply_env_overrides(data: dict) -> dict:
     _set(["security", "jwt_issuer"], "SECURITY_JWT_ISSUER")
     _set(["security", "jwt_exp_minutes"], "SECURITY_JWT_EXP_MINUTES", int)
 
-    _set(["azure_openai", "endpoint"], "AZURE_OPENAI_ENDPOINT")
-    _set(["azure_openai", "api_version"], "AZURE_OPENAI_API_VERSION")
-    _set(["azure_openai", "primary_deployment"], "AZURE_OPENAI_PRIMARY_DEPLOYMENT")
-    _set(["azure_openai", "fallback_deployment"], "AZURE_OPENAI_FALLBACK_DEPLOYMENT")
-    _set(["azure_openai", "timeout"], "AZURE_OPENAI_TIMEOUT", int)
-    _set(["azure_openai", "max_concurrency"], "AZURE_OPENAI_MAX_CONCURRENCY", int)
+    # Backward-compatible aliases: old AZURE_OPENAI_* vars still map into bedrock config.
+    _set(["bedrock", "primary_model_id"], "AZURE_OPENAI_PRIMARY_DEPLOYMENT")
+    _set(["bedrock", "fallback_model_id"], "AZURE_OPENAI_FALLBACK_DEPLOYMENT")
+    _set(["bedrock", "timeout"], "AZURE_OPENAI_TIMEOUT", int)
+    _set(["bedrock", "max_concurrency"], "AZURE_OPENAI_MAX_CONCURRENCY", int)
+    _set(["bedrock", "primary_model_id"], "BEDROCK_PRIMARY_MODEL_ID")
+    _set(["bedrock", "fallback_model_id"], "BEDROCK_FALLBACK_MODEL_ID")
+    _set(["bedrock", "timeout"], "BEDROCK_TIMEOUT", int)
+    _set(["bedrock", "max_concurrency"], "BEDROCK_MAX_CONCURRENCY", int)
 
     _set(["redis", "app", "host"], "REDIS_APP_HOST")
     _set(["redis", "app", "port"], "REDIS_APP_PORT", int)

@@ -1,7 +1,7 @@
 from pydantic import BaseModel
 
 from app.schemas.app_config_schema import AppConfig
-from app.schemas.azure_openai_config_schema import AzureOpenAIConfig
+from app.schemas.bedrock_config_schema import BedrockConfig
 from app.schemas.chunking_config_schema import ChunkingConfig
 from app.schemas.circuit_config_schema import CircuitConfig
 from app.schemas.embedding_config_schema import EmbeddingConfig
@@ -23,7 +23,7 @@ class Settings(BaseModel):
     chunking: ChunkingConfig
     embedding: EmbeddingConfig
     evaluation: EvaluationRuntimeConfig
-    azure_openai: AzureOpenAIConfig
+    bedrock: BedrockConfig
     circuit: CircuitConfig
     memory: MemoryConfig
     guardrails: GuardrailsConfig
@@ -35,7 +35,7 @@ class Settings(BaseModel):
 
 __all__ = [
     "AppConfig",
-    "AzureOpenAIConfig",
+    "BedrockConfig",
     "ChunkingConfig",
     "CircuitConfig",
     "EmbeddingConfig",

@@ -1,21 +1,8 @@
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, AsyncIterator
 
-from app.infra.bedrock_client import aconverse
+from app.infra.bedrock_client import aconverse, aconverse_stream_text
 from app.infra.io_limiters import dependency_limiter
-
-# Previous OpenAI client (kept commented on request):
-# import os
-# from openai import AsyncAzureOpenAI
-# from app.core.config import get_settings
-#
-# settings = get_settings()
-#
-# client = AsyncAzureOpenAI(
-#     api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-#     azure_endpoint=settings.azure_openai.endpoint,
-#     api_version=settings.azure_openai.api_version,
-# )
 
 
 @dataclass
@@ -44,7 +31,7 @@ class _CompatResponse:
 def _to_bedrock_payload(
     messages: list[dict[str, Any]],
 ) -> tuple[list[dict[str, str]], list[dict[str, Any]]]:
-    """Convert OpenAI-style chat messages into Bedrock Converse payload fields."""
+    """Convert role/content chat messages into Bedrock Converse payload fields."""
     system_blocks: list[dict[str, str]] = []
     convo_messages: list[dict[str, Any]] = []
 
@@ -109,7 +96,7 @@ class _BedrockCompatCompletions:
     async def create(
         self, *, model: str, messages: list[dict[str, Any]], timeout: int | None = None
     ):
-        """OpenAI-compatible async chat-completions entrypoint backed by Bedrock Converse."""
+        """Async chat completion entrypoint backed by Bedrock Converse."""
         system_blocks, convo_messages = _to_bedrock_payload(messages)
         payload: dict[str, Any] = {
             "modelId": model,
@@ -121,6 +108,23 @@ class _BedrockCompatCompletions:
         async with dependency_limiter("llm"):
             response = await aconverse(payload, timeout=timeout)
         return _from_bedrock_response(response)
+
+    async def stream(
+        self, *, model: str, messages: list[dict[str, Any]], timeout: int | None = None
+    ) -> AsyncIterator[str]:
+        """Yield true Bedrock token deltas for chat responses."""
+        system_blocks, convo_messages = _to_bedrock_payload(messages)
+        payload: dict[str, Any] = {
+            "modelId": model,
+            "messages": convo_messages,
+        }
+        if system_blocks:
+            payload["system"] = system_blocks
+
+        async with dependency_limiter("llm"):
+            async for delta in aconverse_stream_text(payload, timeout=timeout):
+                if delta:
+                    yield delta
 
 
 class _BedrockCompatChat:

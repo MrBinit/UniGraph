@@ -1,4 +1,4 @@
-6# OpenAPI And API Surface
+# OpenAPI And API Surface
 
 ## Framework
 
@@ -69,6 +69,40 @@ Security:
 
 - Requires a bearer token unless `auth_enabled` is disabled
 - Caller can access only their own `user_id`, unless they have an admin role
+
+### `POST /api/v1/chat/stream`
+
+Real-time streaming endpoint over Server-Sent Events (SSE).
+
+Purpose:
+
+- Accept a user prompt
+- Enforce authentication and authorization
+- Stream true Bedrock token deltas as they are generated
+- Send terminal `done` or `error` events
+
+Request body:
+
+```json
+{
+  "user_id": "user-1",
+  "prompt": "Find AI research labs at Stanford University"
+}
+```
+
+Response content type:
+
+- `text/event-stream`
+
+SSE event examples:
+
+```text
+data: {"type":"chunk","text":"Find"}
+
+data: {"type":"chunk","text":"Find AI research"}
+
+data: {"type":"done"}
+```
 
 ### `GET /api/v1/chat/{job_id}`
 

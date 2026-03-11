@@ -59,7 +59,7 @@ The Python Bedrock SDK is blocking. To avoid default-threadpool contention:
   - `ainvoke_model(...)`
   - `ainvoke_model_json(...)`
 
-`app/infra/azure_openai_client.py` and `app/services/embedding_service.py` call these async wrappers and apply limiters (`llm`, `embedding`).
+`app/infra/bedrock_chat_client.py` and `app/services/embedding_service.py` call these async wrappers and apply limiters (`llm`, `embedding`).
 
 ## Configuration
 

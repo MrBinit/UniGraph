@@ -8,8 +8,11 @@ logger = logging.getLogger(__name__)
 _EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 _PHONE_RE = re.compile(r"\b(?:\+?\d{1,3}[-. ]?)?(?:\(?\d{3}\)?[-. ]?)\d{3}[-. ]?\d{4}\b")
 _OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b")
-_AZURE_KEY_ASSIGN_RE = re.compile(
+_MODEL_KEY_ASSIGN_RE = re.compile(
     r"(?i)\b(?:AZURE_OPENAI_API_KEY|OPENAI_API_KEY)\s*[:=]\s*([^\s\"']+)"
+)
+_AWS_KEY_ASSIGN_RE = re.compile(
+    r"(?i)\b(?:AWS_ACCESS_KEY_ID|AWS_SECRET_ACCESS_KEY|BEDROCK_API_KEY)\s*[:=]\s*([^\s\"']+)"
 )
 _CARD_RE = re.compile(r"\b(?:\d[ -]*?){13,16}\b")
 
@@ -47,7 +50,10 @@ def redact_sensitive_content(text: str) -> str:
     redacted = _EMAIL_RE.sub("[REDACTED_EMAIL]", redacted)
     redacted = _PHONE_RE.sub("[REDACTED_PHONE]", redacted)
     redacted = _OPENAI_KEY_RE.sub("[REDACTED_API_KEY]", redacted)
-    redacted = _AZURE_KEY_ASSIGN_RE.sub(
+    redacted = _MODEL_KEY_ASSIGN_RE.sub(
+        lambda m: m.group(0).split(m.group(1))[0] + "[REDACTED_API_KEY]", redacted
+    )
+    redacted = _AWS_KEY_ASSIGN_RE.sub(
         lambda m: m.group(0).split(m.group(1))[0] + "[REDACTED_API_KEY]", redacted
     )
     redacted = _CARD_RE.sub("[REDACTED_CARD]", redacted)

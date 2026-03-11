@@ -188,7 +188,7 @@ async def aembed_text(text: str) -> list[float]:
         "accept": "application/json",
     }
     async with dependency_limiter("embedding"):
-        response_payload = await ainvoke_model_json(payload, timeout=settings.azure_openai.timeout)
+        response_payload = await ainvoke_model_json(payload, timeout=settings.bedrock.timeout)
     embedding = _coerce_embedding(response_payload)
     await _awrite_cached_embedding(cache_key, embedding)
     return embedding

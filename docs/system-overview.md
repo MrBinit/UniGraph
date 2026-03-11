@@ -27,6 +27,9 @@ Queue-aware runtime order (API + worker path):
 Memory-first view:
 `Query` -> `LLM Job Queue` -> `Worker` -> `Short-Term Memory` -> `Long-Term Memory` -> `LLM` -> `Metrics/Evaluation Queues`.
 
+Interactive streaming path (direct, non-queued):
+`POST /api/v1/chat/stream` -> `Guardrails + Memory + Retrieval` -> `Bedrock token stream` -> `SSE chunk events`.
+
 ## 2) Core Architecture
 - Domain: AI backend for university/research discovery.
 - Chunking: Recursive markdown chunking with semantic separators and overlap.
@@ -116,7 +119,7 @@ Offline evaluation results are stored in a separate table keyed by `request_id`:
 - Evaluation trace latency in request path: 0 ms (background persistence active)
 
 ### C) Migration impact
-- Generation was previously run on Azure OpenAI (explored first), and was shifted to AWS Bedrock to address high response latency.
+- Generation runs on AWS Bedrock with Nova models for primary and fallback responses.
 - After migration and latency tuning, successful request latency dropped sharply versus earlier baseline runs (for example, previous successful LLM latencies in this project were often in the ~18-30s range; latest successful Bedrock sample is ~3.1s).
 - Current remaining risk is access/IAM rollout stability, not pipeline stage latency.
 
