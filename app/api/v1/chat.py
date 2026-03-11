@@ -51,7 +51,9 @@ async def chat(
             session_id=session_id,
         )
     except RuntimeError as exc:
-        logger.warning("Async chat enqueue unavailable for user_id=%s", request.user_id, exc_info=True)
+        logger.warning(
+            "Async chat enqueue unavailable for user_id=%s", request.user_id, exc_info=True
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=_ENQUEUE_UNAVAILABLE_DETAIL,
