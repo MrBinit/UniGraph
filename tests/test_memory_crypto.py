@@ -3,14 +3,22 @@ import hashlib
 import hmac
 import json
 
+import pytest
+
 from app.core import memory_crypto
+
+
+@pytest.fixture(autouse=True)
+def _set_memory_encryption_key(monkeypatch):
+    monkeypatch.setenv("MEMORY_ENCRYPTION_KEY", "m" * 64)
 
 
 def _legacy_v1_payload(payload: dict) -> str:
     plaintext = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     nonce = b"0" * memory_crypto._LEGACY_NONCE_LEN
     ciphertext = memory_crypto._legacy_xor_stream(plaintext, nonce)
-    tag = hmac.new(memory_crypto._LEGACY_MAC_KEY, nonce + ciphertext, hashlib.sha256).digest()
+    mac_key = memory_crypto._legacy_derive_key(b"memory-auth-v1")
+    tag = hmac.new(mac_key, nonce + ciphertext, hashlib.sha256).digest()
     token = base64.urlsafe_b64encode(nonce + ciphertext + tag).decode("ascii")
     return f"{memory_crypto._LEGACY_ENC_PREFIX}{token}"
 
@@ -47,3 +55,10 @@ def test_decrypt_supports_plaintext_json_payload():
     decrypted = memory_crypto.decrypt_memory_payload(raw)
 
     assert decrypted == {"summary": "legacy-plaintext"}
+
+
+def test_encrypt_requires_memory_encryption_key(monkeypatch):
+    monkeypatch.delenv("MEMORY_ENCRYPTION_KEY", raising=False)
+
+    with pytest.raises(RuntimeError, match="MEMORY_ENCRYPTION_KEY is required"):
+        memory_crypto.encrypt_memory_payload({"summary": "hello"})

@@ -7,10 +7,6 @@ import secrets
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from app.core.config import get_settings
-
-settings = get_settings()
-
 _ENC_PREFIX = "enc:v2:"
 _AEAD_NONCE_LEN = 12
 
@@ -22,9 +18,9 @@ _LEGACY_TAG_LEN = 32
 def _master_secret() -> bytes:
     """Return the base secret used to derive memory encryption keys."""
     configured = os.getenv("MEMORY_ENCRYPTION_KEY", "").strip()
-    if configured:
-        return configured.encode("utf-8")
-    return settings.security.jwt_secret.encode("utf-8")
+    if not configured:
+        raise RuntimeError("MEMORY_ENCRYPTION_KEY is required for memory encryption.")
+    return configured.encode("utf-8")
 
 
 def _derive_aead_key() -> bytes:
@@ -32,26 +28,20 @@ def _derive_aead_key() -> bytes:
     return hashlib.sha256(_master_secret()).digest()
 
 
-_AEAD_KEY = _derive_aead_key()
-
-
 def _legacy_derive_key(label: bytes) -> bytes:
     """Derive legacy v1 keys for backward-compatible decryption."""
     return hmac.new(_master_secret(), label, hashlib.sha256).digest()
 
 
-_LEGACY_ENC_KEY = _legacy_derive_key(b"memory-encryption-v1")
-_LEGACY_MAC_KEY = _legacy_derive_key(b"memory-auth-v1")
-
-
 def _legacy_xor_stream(data: bytes, nonce: bytes) -> bytes:
     """Decrypt legacy v1 ciphertext using the original stream transform."""
+    enc_key = _legacy_derive_key(b"memory-encryption-v1")
     out = bytearray(len(data))
     counter = 0
     offset = 0
     while offset < len(data):
         block = hmac.new(
-            _LEGACY_ENC_KEY,
+            enc_key,
             nonce + counter.to_bytes(8, "big"),
             hashlib.sha256,
         ).digest()
@@ -76,7 +66,7 @@ def encrypt_memory_payload(payload: dict) -> str:
     """Encrypt and authenticate a memory payload using AES-GCM."""
     plaintext = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     nonce = secrets.token_bytes(_AEAD_NONCE_LEN)
-    ciphertext = AESGCM(_AEAD_KEY).encrypt(nonce, plaintext, associated_data=None)
+    ciphertext = AESGCM(_derive_aead_key()).encrypt(nonce, plaintext, associated_data=None)
     token = base64.urlsafe_b64encode(nonce + ciphertext).decode("ascii")
     return f"{_ENC_PREFIX}{token}"
 
@@ -93,8 +83,9 @@ def _decrypt_v2_payload(encoded: str) -> dict | None:
 
     nonce = blob[:_AEAD_NONCE_LEN]
     ciphertext = blob[_AEAD_NONCE_LEN:]
+    aead_key = _derive_aead_key()
     try:
-        plaintext = AESGCM(_AEAD_KEY).decrypt(nonce, ciphertext, associated_data=None)
+        plaintext = AESGCM(aead_key).decrypt(nonce, ciphertext, associated_data=None)
     except Exception:
         return None
     try:
@@ -118,7 +109,8 @@ def _decrypt_v1_payload(encoded: str) -> dict | None:
     tag = blob[-_LEGACY_TAG_LEN:]
     ciphertext = blob[_LEGACY_NONCE_LEN:-_LEGACY_TAG_LEN]
 
-    expected = hmac.new(_LEGACY_MAC_KEY, nonce + ciphertext, hashlib.sha256).digest()
+    mac_key = _legacy_derive_key(b"memory-auth-v1")
+    expected = hmac.new(mac_key, nonce + ciphertext, hashlib.sha256).digest()
     if not hmac.compare_digest(tag, expected):
         return None
 

@@ -151,3 +151,22 @@ def test_claim_stale_summary_jobs_reads_xautoclaim(monkeypatch):
     assert fake_redis.last_xautoclaim["consumername"] == "worker-a"
     assert fake_redis.last_xautoclaim["min_idle_time"] == 12345
     assert fake_redis.last_xautoclaim["count"] == 42
+
+
+def test_enqueue_summary_job_uses_worker_redis_client(monkeypatch):
+    fake_redis = FakeRedis()
+    monkeypatch.setattr(summary_queue_service, "worker_redis_client", fake_redis)
+
+    job_id = summary_queue_service.enqueue_summary_job(
+        user_id="user-1",
+        cutoff_seq=10,
+        trigger="token_limit",
+        enqueue_version=2,
+        approx_removed_tokens=900,
+    )
+
+    assert isinstance(job_id, str) and job_id
+    entries = fake_redis.streams[summary_queue_service._stream_key()]
+    assert len(entries) == 1
+    assert entries[0][1]["user_id"] == "user-1"
+    assert entries[0][1]["cutoff_seq"] == "10"

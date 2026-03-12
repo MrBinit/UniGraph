@@ -6,6 +6,7 @@ import asyncio
 import logging
 
 from app.core.config import get_settings
+from app.core.security import validate_security_configuration
 from app.services.metrics_dynamodb_service import persist_aggregate_snapshot_dynamodb
 from app.services.metrics_json_service import (
     append_chat_metrics_json,
@@ -95,6 +96,7 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    validate_security_configuration()
     try:
         asyncio.run(run_forever())
     except KeyboardInterrupt:

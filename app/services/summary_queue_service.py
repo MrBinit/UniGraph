@@ -7,7 +7,7 @@ from uuid import uuid4
 from redis.exceptions import RedisError, ResponseError
 
 from app.core.config import get_settings
-from app.infra.redis_client import app_redis_client, worker_redis_client, worker_scoped_key
+from app.infra.redis_client import worker_redis_client, worker_scoped_key
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
@@ -218,7 +218,7 @@ def enqueue_summary_job(
     }
 
     try:
-        app_redis_client.xadd(
+        worker_redis_client.xadd(
             _stream_key(),
             payload,
             maxlen=10000,

@@ -32,6 +32,7 @@ _RETRIEVAL_CHUNK_MAX_CHARS = 360
 _RETRIEVAL_MAX_PROMPT_RESULTS = 2
 _RETRIEVAL_EVIDENCE_MAX_ITEMS = 3
 _RETRIEVAL_EVIDENCE_CONTENT_MAX_CHARS = 700
+_STREAM_GUARD_HOLDBACK_CHARS = 120
 
 
 def _chat_cache_key(user_id: str, prompt: str, session_id: str | None = None) -> str:
@@ -773,10 +774,17 @@ async def generate_response_stream(
 ) -> AsyncIterator[str]:
     """Stream true model output from Bedrock and yield progressively assembled text."""
 
-    async def _yield_assembled(delta_stream: AsyncIterator[str]) -> AsyncIterator[str]:
+    async def _yield_guarded_stream(
+        delta_stream: AsyncIterator[str],
+        *,
+        stream_state: dict[str, object],
+    ) -> AsyncIterator[str]:
         assembled = ""
+        emitted = ""
         size = max(1, int(chunk_size))
         delay_seconds = max(0.0, float(chunk_delay_ms) / 1000.0)
+        holdback_chars = max(0, _STREAM_GUARD_HOLDBACK_CHARS)
+
         async for delta in delta_stream:
             text = str(delta or "")
             if not text:
@@ -786,9 +794,41 @@ async def generate_response_stream(
                 if not piece:
                     continue
                 assembled += piece
-                yield assembled
-                if delay_seconds > 0:
-                    await asyncio.sleep(delay_seconds)
+                guarded = guard_model_output(assembled)
+                guarded_text = str(guarded.get("text", ""))
+                blocked = bool(guarded.get("blocked"))
+                reason = str(guarded.get("reason", "blocked_output")) if blocked else ""
+
+                stream_state["blocked"] = blocked
+                stream_state["reason"] = reason
+                stream_state["final_text"] = guarded_text
+
+                if blocked:
+                    if guarded_text and guarded_text != emitted:
+                        emitted = guarded_text
+                        yield emitted
+                    return
+
+                stable_len = len(guarded_text) - holdback_chars
+                if stable_len <= 0:
+                    continue
+
+                stable_text = guarded_text[:stable_len]
+                if stable_text and stable_text != emitted:
+                    emitted = stable_text
+                    yield emitted
+                    if delay_seconds > 0:
+                        await asyncio.sleep(delay_seconds)
+
+        guarded = guard_model_output(assembled)
+        guarded_text = str(guarded.get("text", ""))
+        blocked = bool(guarded.get("blocked"))
+        reason = str(guarded.get("reason", "blocked_output")) if blocked else ""
+        stream_state["blocked"] = blocked
+        stream_state["reason"] = reason
+        stream_state["final_text"] = guarded_text
+        if guarded_text and guarded_text != emitted:
+            yield guarded_text
 
     started_at = time.perf_counter()
     request_id = uuid4().hex
@@ -979,9 +1019,17 @@ async def generate_response_stream(
     messages = context_guard["messages"]
 
     streamed_text = ""
+    stream_guard_state: dict[str, object] = {
+        "blocked": False,
+        "reason": "",
+        "final_text": "",
+    }
     model_started_at = time.perf_counter()
     try:
-        async for partial in _yield_assembled(_stream_primary(messages)):
+        async for partial in _yield_guarded_stream(
+            _stream_primary(messages),
+            stream_state=stream_guard_state,
+        ):
             streamed_text = partial
             yield partial
     except Exception as primary_exc:
@@ -1021,7 +1069,15 @@ async def generate_response_stream(
             await _record_latency_metrics(started_at, "model_error")
             raise
         try:
-            async for partial in _yield_assembled(_stream_fallback(messages)):
+            stream_guard_state = {
+                "blocked": False,
+                "reason": "",
+                "final_text": "",
+            }
+            async for partial in _yield_guarded_stream(
+                _stream_fallback(messages),
+                stream_state=stream_guard_state,
+            ):
                 streamed_text = partial
                 yield partial
         except Exception as fallback_exc:
@@ -1060,17 +1116,14 @@ async def generate_response_stream(
             raise
     model_ms = _elapsed_ms(model_started_at)
 
-    guarded_output = guard_model_output(streamed_text)
-    result = guarded_output["text"]
-    if guarded_output["blocked"]:
-        output_guard_reason = str(guarded_output.get("reason", "blocked_output"))
+    result = str(stream_guard_state.get("final_text", streamed_text) or streamed_text)
+    if bool(stream_guard_state.get("blocked")):
+        output_guard_reason = str(stream_guard_state.get("reason", "blocked_output"))
         logger.info(
             "GuardrailDecision | stage=output | user=%s | blocked=true | reason=%s",
             user_id,
             output_guard_reason,
         )
-    if result != streamed_text:
-        yield result
 
     memory_update_started_at = time.perf_counter()
     try:

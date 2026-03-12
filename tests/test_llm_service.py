@@ -322,7 +322,8 @@ async def test_generate_response_stream_primary_success(monkeypatch):
     async for partial in llm_service.generate_response_stream("user-1", "hello"):
         outputs.append(partial)
 
-    assert outputs == ["he", "hello"]
+    assert outputs
+    assert outputs[-1] == "hello"
     cache_key = llm_service._chat_cache_key("user-1", "hello")
     assert fake_redis.store[cache_key] == "hello"
 
@@ -378,7 +379,70 @@ async def test_generate_response_stream_uses_fallback_on_primary_failure(monkeyp
     async for partial in llm_service.generate_response_stream("user-1", "hello"):
         outputs.append(partial)
 
-    assert outputs == ["fallback"]
+    assert outputs
+    assert outputs[-1] == "fallback"
+
+
+@pytest.mark.asyncio
+async def test_generate_response_stream_blocks_unsafe_output_before_emit(monkeypatch):
+    fake_redis = FakeRedis()
+    _attach_fake_redis(monkeypatch, fake_redis)
+
+    async def fake_build_context(_user_id, user_prompt):
+        return [{"role": "user", "content": user_prompt}]
+
+    async def fake_stream_primary(_messages):
+        yield "safe intro"
+        yield " unsafe payload"
+
+    async def fake_stream_fallback(_messages):
+        raise AssertionError("fallback should not run")
+        if False:  # pragma: no cover
+            yield ""
+
+    async def fake_update_memory(*_args, **_kwargs):
+        return None
+
+    async def fake_retrieve_document_chunks(*_args, **_kwargs):
+        return {"results": []}
+
+    async def fake_persist_evaluation_trace(*_args, **_kwargs):
+        return None
+
+    def fake_guard_model_output(text: str):
+        if "unsafe payload" in text:
+            return {
+                "blocked": True,
+                "text": "guardrail refusal",
+                "reason": "blocked_output_pattern",
+            }
+        return {"blocked": False, "text": text, "reason": ""}
+
+    monkeypatch.setattr(llm_service, "build_context", fake_build_context)
+    monkeypatch.setattr(llm_service, "_stream_primary", fake_stream_primary)
+    monkeypatch.setattr(llm_service, "_stream_fallback", fake_stream_fallback)
+    monkeypatch.setattr(llm_service, "update_memory", fake_update_memory)
+    monkeypatch.setattr(llm_service, "aretrieve_document_chunks", fake_retrieve_document_chunks)
+    monkeypatch.setattr(llm_service, "_persist_evaluation_trace", fake_persist_evaluation_trace)
+    monkeypatch.setattr(llm_service, "guard_model_output", fake_guard_model_output)
+    monkeypatch.setattr(llm_service, "_STREAM_GUARD_HOLDBACK_CHARS", 0)
+    monkeypatch.setattr(
+        llm_service,
+        "guard_user_input",
+        lambda _user_id, prompt: {"blocked": False, "sanitized_text": prompt, "reason": ""},
+    )
+    monkeypatch.setattr(
+        llm_service,
+        "apply_context_guardrails",
+        lambda messages: {"blocked": False, "messages": messages, "reason": ""},
+    )
+
+    outputs = []
+    async for partial in llm_service.generate_response_stream("user-1", "hello"):
+        outputs.append(partial)
+
+    assert outputs[-1] == "guardrail refusal"
+    assert all("unsafe payload" not in partial for partial in outputs)
 
 
 def test_chat_cache_key_uses_hash_without_raw_prompt_text():

@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 from app.core.config import get_settings
+from app.core.security import validate_security_configuration
 from app.services.llm_async_queue_service import (
     delete_llm_job_message,
     get_chat_job,
@@ -91,6 +92,7 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    validate_security_configuration()
     try:
         asyncio.run(run_forever())
     except KeyboardInterrupt:

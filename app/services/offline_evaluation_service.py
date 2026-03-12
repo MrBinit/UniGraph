@@ -1,15 +1,36 @@
 import asyncio
+import logging
 import os
+import uuid
 from datetime import datetime, timezone
 import boto3
 from boto3.dynamodb.types import TypeDeserializer
 from app.core.config import get_settings
+from app.infra.redis_client import app_redis_client, app_scoped_key
 from app.scripts.eval_daily_report import _build_report, _load_eval_rows
 from app.scripts.eval_dynamodb_worker import run as run_eval_worker
+from redis.exceptions import RedisError
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 _deserializer = TypeDeserializer()
 _scheduler_task: asyncio.Task | None = None
+_scheduler_lock_token: str | None = None
+_SCHEDULER_LOCK_KEY = app_scoped_key("evaluation:offline:scheduler:leader")
+_SCHEDULER_LOCK_TTL_SECONDS = 120
+_SCHEDULER_POLL_SECONDS = 30
+_REFRESH_SCHEDULER_LOCK_SCRIPT = """
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("EXPIRE", KEYS[1], tonumber(ARGV[2]))
+end
+return 0
+"""
+_RELEASE_SCHEDULER_LOCK_SCRIPT = """
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("DEL", KEYS[1])
+end
+return 0
+"""
 
 
 def _utc_now() -> datetime:
@@ -35,6 +56,57 @@ def _region_name() -> str | None:
 def _dynamodb_client():
     kwargs = {"region_name": _region_name()} if _region_name() else {}
     return boto3.client("dynamodb", **kwargs)
+
+
+def _acquire_scheduler_lock() -> str | None:
+    token = uuid.uuid4().hex
+    try:
+        acquired = bool(
+            app_redis_client.set(
+                _SCHEDULER_LOCK_KEY,
+                token,
+                ex=_SCHEDULER_LOCK_TTL_SECONDS,
+                nx=True,
+            )
+        )
+    except RedisError as exc:
+        logger.warning("OfflineEvalSchedulerLockAcquireFailed | error=%s", exc)
+        return None
+
+    if not acquired:
+        return None
+    return token
+
+
+def _refresh_scheduler_lock(token: str) -> bool:
+    if not token:
+        return False
+    try:
+        result = app_redis_client.eval(
+            _REFRESH_SCHEDULER_LOCK_SCRIPT,
+            1,
+            _SCHEDULER_LOCK_KEY,
+            token,
+            _SCHEDULER_LOCK_TTL_SECONDS,
+        )
+    except RedisError as exc:
+        logger.warning("OfflineEvalSchedulerLockRefreshFailed | error=%s", exc)
+        return False
+    return bool(result and int(result) == 1)
+
+
+def _release_scheduler_lock(token: str):
+    if not token:
+        return
+    try:
+        app_redis_client.eval(
+            _RELEASE_SCHEDULER_LOCK_SCRIPT,
+            1,
+            _SCHEDULER_LOCK_KEY,
+            token,
+        )
+    except RedisError as exc:
+        logger.warning("OfflineEvalSchedulerLockReleaseFailed | error=%s", exc)
 
 
 def _deserialize(item: dict) -> dict:
@@ -226,35 +298,51 @@ def build_offline_eval_report(hours: int, top_bad: int) -> dict:
     return _build_report(rows=rows, top_bad=top_bad, window_hours=hours)
 
 
-async def _scheduler_loop():
-    interval_seconds = max(300, settings.evaluation.schedule_interval_hours * 3600)
-    while True:
-        try:
-            await run_offline_eval(limit=settings.evaluation.batch_size, force=False)
-        except Exception:
-            # Scheduler is best-effort and should not crash the app.
-            pass
-        await asyncio.sleep(interval_seconds)
+async def _scheduler_loop(lock_token: str):
+    global _scheduler_lock_token
+    try:
+        while True:
+            if not _refresh_scheduler_lock(lock_token):
+                logger.info("OfflineEvalSchedulerLockLost | stopping scheduler loop")
+                return
+            try:
+                await run_offline_eval(limit=settings.evaluation.batch_size, force=False)
+            except Exception as exc:
+                # Scheduler is best-effort and should not crash the app.
+                logger.warning("OfflineEvalSchedulerRunFailed | error=%s", exc)
+            await asyncio.sleep(_SCHEDULER_POLL_SECONDS)
+    finally:
+        if _scheduler_lock_token == lock_token:
+            _scheduler_lock_token = None
 
 
 def start_offline_eval_scheduler() -> None:
     """Start background scheduler for periodic offline evaluations."""
-    global _scheduler_task
+    global _scheduler_task, _scheduler_lock_token
     if _scheduler_task is not None and not _scheduler_task.done():
         return
     if not settings.evaluation.enabled or not settings.evaluation.schedule_enabled:
         return
-    _scheduler_task = asyncio.create_task(_scheduler_loop())
+    lock_token = _acquire_scheduler_lock()
+    if not lock_token:
+        logger.info("OfflineEvalSchedulerLockBusy | scheduler start skipped")
+        return
+    _scheduler_lock_token = lock_token
+    _scheduler_task = asyncio.create_task(_scheduler_loop(lock_token))
 
 
 async def stop_offline_eval_scheduler() -> None:
     """Stop the background offline evaluation scheduler."""
-    global _scheduler_task
-    if _scheduler_task is None:
-        return
-    _scheduler_task.cancel()
-    try:
-        await _scheduler_task
-    except asyncio.CancelledError:
-        pass
+    global _scheduler_task, _scheduler_lock_token
+    lock_token = _scheduler_lock_token
+    if _scheduler_task is not None:
+        _scheduler_task.cancel()
+        try:
+            await _scheduler_task
+        except asyncio.CancelledError:
+            pass
+    if lock_token:
+        _release_scheduler_lock(lock_token)
+        if _scheduler_lock_token == lock_token:
+            _scheduler_lock_token = None
     _scheduler_task = None

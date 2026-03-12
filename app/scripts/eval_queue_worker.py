@@ -1,11 +1,10 @@
 """SQS worker for per-request offline evaluation jobs."""
 
 from __future__ import annotations
-
 import asyncio
 import logging
-
 from app.core.config import get_settings
+from app.core.security import validate_security_configuration
 from app.scripts.eval_dynamodb_worker import run_request_eval
 from app.services.sqs_event_queue_service import (
     delete_queue_message,
@@ -80,6 +79,7 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    validate_security_configuration()
     try:
         asyncio.run(run_forever())
     except KeyboardInterrupt:
