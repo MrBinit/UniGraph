@@ -1,0 +1,34 @@
+target:
+  base_url: "http://127.0.0.1:18000"
+
+workload:
+  users: 200
+  requests_per_user: 4
+  concurrency: 50
+  prompt: "Compare top AI universities in Germany, their labs, funding, and industry links."
+
+timeouts:
+  enqueue_seconds: 20
+  status_request_seconds: 10
+  poll_seconds: 300
+  poll_interval_seconds: 1
+
+assertions:
+  max_enqueue_error_rate: 0.02
+  max_failed_jobs_rate: 0.05
+
+runtime:
+  api_workers: 5
+  api_port: 18000
+  local_redis_port: 6380
+  llm_async_workers: 6
+  metrics_workers: 3
+  wait_for_metrics_drain_seconds: 120
+  llm_mock_delay_ms: 80
+  embedding_mock_delay_ms: 12
+  memory_summary_mock_delay_ms: 10
+  llm_queue_url: "https://sqs.us-east-1.amazonaws.com/173763384281/unigraph-llm-jobs-loadtest"
+  metrics_queue_url: "https://sqs.us-east-1.amazonaws.com/173763384281/unigraph-metrics-aggregation-jobs-loadtest"
+  evaluation_queue_url: ""
+  # Keep evaluation queue off here because it invokes LLM-as-judge.
+  evaluation_queue_enabled: false

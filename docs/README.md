@@ -16,6 +16,7 @@ Files in this folder:
 - `ops.md`: operational status endpoint and the metrics it exposes.
 - `evaluation-pipeline.md`: end-to-end offline evaluation architecture (evidence capture, judge prompts, scoring, storage, reports).
 - `async-chat-sqs.md`: async chat queue architecture (SQS enqueue, worker consumption, DynamoDB result store, APIs).
+- `load-testing-aws.md`: YAML-driven AWS full-stack load testing (SQS, Postgres, DynamoDB, Redis, workers, result interpretation).
 - `system-overview.md`: concise end-to-end architecture, Bedrock-based generation/retrieval flow, security/scalability, and latest performance snapshot.
 - `strategy.md`: current architecture state and the recommended next build steps.
 
@@ -31,5 +32,7 @@ Recommended reading order:
 8. `ops.md`
 9. `async-io-path.md`
 10. `evaluation-pipeline.md`
-11. `system-overview.md`
-12. `strategy.md`
+11. `async-chat-sqs.md`
+12. `load-testing-aws.md`
+13. `system-overview.md`
+14. `strategy.md`

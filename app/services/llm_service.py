@@ -2,7 +2,9 @@ import asyncio
 import hashlib
 import inspect
 import logging
+import os
 import time
+from types import SimpleNamespace
 from typing import AsyncIterator
 from uuid import uuid4
 from redis.exceptions import RedisError
@@ -33,6 +35,11 @@ _RETRIEVAL_MAX_PROMPT_RESULTS = 2
 _RETRIEVAL_EVIDENCE_MAX_ITEMS = 3
 _RETRIEVAL_EVIDENCE_CONTENT_MAX_CHARS = 700
 _STREAM_GUARD_HOLDBACK_CHARS = 120
+_LLM_MOCK_MODE_ENV = "LLM_MOCK_MODE"
+_LLM_MOCK_TEXT_ENV = "LLM_MOCK_TEXT"
+_LLM_MOCK_DELAY_MS_ENV = "LLM_MOCK_DELAY_MS"
+_LLM_MOCK_STREAM_CHUNK_CHARS_ENV = "LLM_MOCK_STREAM_CHUNK_CHARS"
+_RETRIEVAL_DISABLED_ENV = "RETRIEVAL_DISABLED"
 
 
 def _chat_cache_key(user_id: str, prompt: str, session_id: str | None = None) -> str:
@@ -77,6 +84,71 @@ def _safe_int(value) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _truthy_env(name: str) -> bool:
+    """Parse one boolean feature flag from environment variables."""
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _llm_mock_delay_seconds() -> float:
+    """Return synthetic LLM latency in seconds for mock mode."""
+    raw = os.getenv(_LLM_MOCK_DELAY_MS_ENV, "").strip()
+    if not raw:
+        return 0.0
+    try:
+        delay_ms = max(0, int(raw))
+    except ValueError:
+        return 0.0
+    return delay_ms / 1000.0
+
+
+def _llm_mock_stream_chunk_chars() -> int:
+    """Return per-chunk character size used by mock streaming responses."""
+    raw = os.getenv(_LLM_MOCK_STREAM_CHUNK_CHARS_ENV, "").strip()
+    if not raw:
+        return 24
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 24
+
+
+def _llm_mock_text(messages: list) -> str:
+    """Build deterministic synthetic model output for load testing."""
+    configured = os.getenv(_LLM_MOCK_TEXT_ENV, "").strip()
+    if configured:
+        return configured
+    for message in reversed(messages):
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") != "user":
+            continue
+        content = str(message.get("content", "")).strip()
+        if content:
+            return f"[mock-llm] {content[:240]}"
+    return "[mock-llm] synthetic response"
+
+
+def _mock_completion_response(messages: list):
+    """Build one compatibility response object matching Bedrock adapter shape."""
+    text = _llm_mock_text(messages)
+    prompt_tokens = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        content = str(message.get("content", "")).strip()
+        if content:
+            prompt_tokens += max(1, len(content.split()))
+    prompt_tokens = max(1, prompt_tokens)
+    completion_tokens = max(1, len(text.split()))
+    usage = SimpleNamespace(
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+    )
+    choice = SimpleNamespace(message=SimpleNamespace(content=text))
+    return SimpleNamespace(choices=[choice], usage=usage)
 
 
 def _extract_llm_usage(response) -> dict:
@@ -378,6 +450,11 @@ async def _persist_evaluation_trace(
 
 async def _call_primary(messages: list):
     """Send the request to the primary Bedrock model."""
+    if _truthy_env(_LLM_MOCK_MODE_ENV):
+        delay_seconds = _llm_mock_delay_seconds()
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+        return _mock_completion_response(messages)
     return await client.chat.completions.create(
         model=settings.bedrock.primary_model_id,
         messages=messages,
@@ -387,6 +464,11 @@ async def _call_primary(messages: list):
 
 async def _call_fallback(messages: list):
     """Send the request to the fallback Bedrock model."""
+    if _truthy_env(_LLM_MOCK_MODE_ENV):
+        delay_seconds = _llm_mock_delay_seconds()
+        if delay_seconds > 0:
+            await asyncio.sleep(delay_seconds)
+        return _mock_completion_response(messages)
     return await client.chat.completions.create(
         model=settings.bedrock.fallback_model_id,
         messages=messages,
@@ -396,6 +478,19 @@ async def _call_fallback(messages: list):
 
 async def _stream_primary(messages: list) -> AsyncIterator[str]:
     """Stream token deltas from the primary deployment."""
+    if _truthy_env(_LLM_MOCK_MODE_ENV):
+        text = _llm_mock_text(messages)
+        chunk_size = _llm_mock_stream_chunk_chars()
+        delay_seconds = _llm_mock_delay_seconds()
+        for start in range(0, len(text), chunk_size):
+            chunk = text[start : start + chunk_size]
+            if not chunk:
+                continue
+            yield chunk
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+        return
+
     async for delta in client.chat.completions.stream(
         model=settings.bedrock.primary_model_id,
         messages=messages,
@@ -406,6 +501,19 @@ async def _stream_primary(messages: list) -> AsyncIterator[str]:
 
 async def _stream_fallback(messages: list) -> AsyncIterator[str]:
     """Stream token deltas from the fallback deployment."""
+    if _truthy_env(_LLM_MOCK_MODE_ENV):
+        text = _llm_mock_text(messages)
+        chunk_size = _llm_mock_stream_chunk_chars()
+        delay_seconds = _llm_mock_delay_seconds()
+        for start in range(0, len(text), chunk_size):
+            chunk = text[start : start + chunk_size]
+            if not chunk:
+                continue
+            yield chunk
+            if delay_seconds > 0:
+                await asyncio.sleep(delay_seconds)
+        return
+
     async for delta in client.chat.completions.stream(
         model=settings.bedrock.fallback_model_id,
         messages=messages,
@@ -530,7 +638,10 @@ async def generate_response(user_id: str, user_prompt: str, session_id: str | No
     build_context_ms = _elapsed_ms(build_context_started_at)
 
     retrieval_query = _build_retrieval_query(messages)
-    if retrieval_query:
+    if _truthy_env(_RETRIEVAL_DISABLED_ENV):
+        retrieval_strategy = "disabled"
+        retrieval_ms = 0
+    elif retrieval_query:
         retrieval_started_at = time.perf_counter()
         try:
             retrieval_result = await aretrieve_document_chunks(
@@ -945,7 +1056,10 @@ async def generate_response_stream(
     build_context_ms = _elapsed_ms(build_context_started_at)
 
     retrieval_query = _build_retrieval_query(messages)
-    if retrieval_query:
+    if _truthy_env(_RETRIEVAL_DISABLED_ENV):
+        retrieval_strategy = "disabled"
+        retrieval_ms = 0
+    elif retrieval_query:
         retrieval_started_at = time.perf_counter()
         try:
             retrieval_result = await aretrieve_document_chunks(

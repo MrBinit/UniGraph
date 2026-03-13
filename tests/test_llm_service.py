@@ -153,6 +153,34 @@ async def test_generate_response_uses_primary_and_updates_memory(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_generate_response_skips_retrieval_when_disabled(monkeypatch):
+    monkeypatch.setenv("RETRIEVAL_DISABLED", "true")
+    fake_redis = FakeRedis()
+    _attach_fake_redis(monkeypatch, fake_redis)
+
+    async def fake_build_context(_user_id, user_prompt):
+        return [{"role": "user", "content": user_prompt}]
+
+    async def fake_primary(_messages):
+        return FakeResponse("primary-response")
+
+    async def fake_update_memory(*_args, **_kwargs):
+        return None
+
+    async def should_not_retrieve(*_args, **_kwargs):
+        raise AssertionError("retrieval should be skipped when RETRIEVAL_DISABLED=true")
+
+    monkeypatch.setattr(llm_service, "build_context", fake_build_context)
+    monkeypatch.setattr(llm_service, "_call_primary", fake_primary)
+    monkeypatch.setattr(llm_service, "update_memory", fake_update_memory)
+    monkeypatch.setattr(llm_service, "aretrieve_document_chunks", should_not_retrieve)
+
+    result = await llm_service.generate_response("user-1", "find ai professor")
+
+    assert result == "primary-response"
+
+
+@pytest.mark.asyncio
 async def test_generate_response_uses_fallback_when_primary_fails(monkeypatch):
     fake_redis = FakeRedis()
     _attach_fake_redis(monkeypatch, fake_redis)
@@ -443,6 +471,43 @@ async def test_generate_response_stream_blocks_unsafe_output_before_emit(monkeyp
 
     assert outputs[-1] == "guardrail refusal"
     assert all("unsafe payload" not in partial for partial in outputs)
+
+
+@pytest.mark.asyncio
+async def test_call_primary_uses_mock_mode_without_bedrock_client(monkeypatch):
+    monkeypatch.setenv("LLM_MOCK_MODE", "true")
+    monkeypatch.setenv("LLM_MOCK_TEXT", "mocked completion")
+
+    async def should_not_call(**_kwargs):
+        raise AssertionError("Bedrock client should not be called in mock mode")
+
+    monkeypatch.setattr(llm_service.client.chat.completions, "create", should_not_call)
+
+    response = await llm_service._call_primary([{"role": "user", "content": "hello"}])
+
+    assert response.choices[0].message.content == "mocked completion"
+    assert response.usage.total_tokens >= response.usage.prompt_tokens
+
+
+@pytest.mark.asyncio
+async def test_stream_primary_uses_mock_mode_without_bedrock_client(monkeypatch):
+    monkeypatch.setenv("LLM_MOCK_MODE", "true")
+    monkeypatch.setenv("LLM_MOCK_TEXT", "mock stream text")
+    monkeypatch.setenv("LLM_MOCK_STREAM_CHUNK_CHARS", "4")
+
+    async def should_not_stream(**_kwargs):
+        raise AssertionError("Bedrock stream should not be called in mock mode")
+        if False:  # pragma: no cover
+            yield ""
+
+    monkeypatch.setattr(llm_service.client.chat.completions, "stream", should_not_stream)
+
+    chunks = []
+    async for chunk in llm_service._stream_primary([{"role": "user", "content": "hello"}]):
+        chunks.append(chunk)
+
+    assert "".join(chunks) == "mock stream text"
+    assert len(chunks) >= 2
 
 
 def test_chat_cache_key_uses_hash_without_raw_prompt_text():
