@@ -154,9 +154,7 @@ def _load_run_settings(config: dict) -> dict:
         "users": int(_cfg(config, "workload.users", 100)),
         "requests_per_user": int(_cfg(config, "workload.requests_per_user", 1)),
         "concurrency": int(_cfg(config, "workload.concurrency", 25)),
-        "prompt": str(
-            _cfg(config, "workload.prompt", "Tell me about AI universities in Germany.")
-        ),
+        "prompt": str(_cfg(config, "workload.prompt", "Tell me about AI universities in Germany.")),
         "enqueue_timeout": float(_cfg(config, "timeouts.enqueue_seconds", 20)),
         "poll_timeout": float(_cfg(config, "timeouts.poll_seconds", 240)),
         "poll_interval": float(_cfg(config, "timeouts.poll_interval_seconds", 1)),
@@ -287,15 +285,9 @@ def _print_summary(summary: dict) -> None:
     print(f"enqueue_success:           {summary['enqueue_success']}")
     print(f"enqueue_error_count:       {summary['enqueue_error_count']}")
     print(f"enqueue_error_rate:        {summary['enqueue_error_rate']:.4f}")
-    print(
-        f"enqueue_latency_p50_ms:    {percentile(summary['enqueue_latencies'], 50):.2f}"
-    )
-    print(
-        f"enqueue_latency_p95_ms:    {percentile(summary['enqueue_latencies'], 95):.2f}"
-    )
-    print(
-        f"enqueue_latency_p99_ms:    {percentile(summary['enqueue_latencies'], 99):.2f}"
-    )
+    print(f"enqueue_latency_p50_ms:    {percentile(summary['enqueue_latencies'], 50):.2f}")
+    print(f"enqueue_latency_p95_ms:    {percentile(summary['enqueue_latencies'], 95):.2f}")
+    print(f"enqueue_latency_p99_ms:    {percentile(summary['enqueue_latencies'], 99):.2f}")
     print(f"enqueue_status_counts:     {dict(summary['enqueue_status_counts'])}")
     if summary["enqueue_error_counts"]:
         print(f"enqueue_errors:            {dict(summary['enqueue_error_counts'])}")

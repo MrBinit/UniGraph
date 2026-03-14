@@ -561,9 +561,10 @@ def test_build_json_metrics_record_uses_metrics_state_and_legacy_kwargs():
 
 def test_retrieval_helpers_handle_invalid_and_valid_inputs():
     assert llm_service._retrieval_result_label(None, 3) == "Result 3"
-    assert llm_service._retrieval_result_label(
-        {"university": "Uni", "section_heading": "Programs"}, 1
-    ) == "Uni | Programs"
+    assert (
+        llm_service._retrieval_result_label({"university": "Uni", "section_heading": "Programs"}, 1)
+        == "Uni | Programs"
+    )
     assert llm_service._retrieval_content_and_metadata(None) == ("", {})
     assert llm_service._retrieval_content_and_metadata({"content": "   "}) == ("", {})
     assert llm_service._retrieval_content_and_metadata(

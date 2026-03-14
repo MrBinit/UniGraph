@@ -63,7 +63,9 @@ async def run_forever() -> None:
 
         queue_url = settings.queue.metrics_aggregation_queue_url.strip()
         if not queue_url:
-            logger.warning("MetricsAggregationWorkerMisconfigured | METRICS_AGGREGATION_QUEUE_URL missing")
+            logger.warning(
+                "MetricsAggregationWorkerMisconfigured | METRICS_AGGREGATION_QUEUE_URL missing"
+            )
             await asyncio.sleep(max(1.0, settings.queue.metrics_aggregation_poll_sleep_seconds))
             continue
 

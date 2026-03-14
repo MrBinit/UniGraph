@@ -501,13 +501,17 @@ async def _call_fallback(messages: list):
 
 async def _stream_primary(messages: list) -> AsyncIterator[str]:
     """Stream token deltas from the primary deployment."""
-    async for delta in _chat_completion_stream(messages, model_id=settings.bedrock.primary_model_id):
+    async for delta in _chat_completion_stream(
+        messages, model_id=settings.bedrock.primary_model_id
+    ):
         yield delta
 
 
 async def _stream_fallback(messages: list) -> AsyncIterator[str]:
     """Stream token deltas from the fallback deployment."""
-    async for delta in _chat_completion_stream(messages, model_id=settings.bedrock.fallback_model_id):
+    async for delta in _chat_completion_stream(
+        messages, model_id=settings.bedrock.fallback_model_id
+    ):
         yield delta
 
 
@@ -870,7 +874,9 @@ async def _yield_guarded_stream(
             if blocked:
                 return
 
-    guarded_text, _blocked = _guard_stream_text(str(stream_state.get("_assembled", "")), stream_state)
+    guarded_text, _blocked = _guard_stream_text(
+        str(stream_state.get("_assembled", "")), stream_state
+    )
     if guarded_text and guarded_text != emitted:
         yield guarded_text
 
@@ -1115,7 +1121,9 @@ async def generate_response_stream(
         raise
 
     stream_guard_state = runtime["stream_guard_state"]
-    result = str(stream_guard_state.get("final_text", runtime["streamed_text"]) or runtime["streamed_text"])
+    result = str(
+        stream_guard_state.get("final_text", runtime["streamed_text"]) or runtime["streamed_text"]
+    )
     if bool(stream_guard_state.get("blocked")):
         state["output_guard_reason"] = str(stream_guard_state.get("reason", "blocked_output"))
         logger.info(

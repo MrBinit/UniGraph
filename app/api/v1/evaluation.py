@@ -124,9 +124,12 @@ async def get_eval_offline_status(
 @router.post("/eval/offline/run", response_model=OfflineEvaluationRunResponse)
 async def run_eval_offline(
     principal: Annotated[Principal, Depends(get_current_principal)],
-    force: Annotated[bool, Query(
-        description="If true, run immediately regardless of interval/new-data guards.",
-    )] = False,
+    force: Annotated[
+        bool,
+        Query(
+            description="If true, run immediately regardless of interval/new-data guards.",
+        ),
+    ] = False,
     limit: Annotated[int | None, Query(ge=1, le=5000)] = None,
 ):
     """Run offline evaluator on demand."""
