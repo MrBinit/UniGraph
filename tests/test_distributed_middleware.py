@@ -29,7 +29,7 @@ def test_redis_fixed_window_limiter_enforces_limit(monkeypatch):
     )
 
     client_ip = _ip(1, 2, 3, 4)
-    limiter_key = f"user:1|ip:{client_ip}|path:/api/v1/chat"
+    limiter_key = f"user:1|ip:{client_ip}|path:/api/v1/chat/stream"
     allowed_1, retry_1 = limiter.allow(limiter_key)
     allowed_2, retry_2 = limiter.allow(limiter_key)
     allowed_3, retry_3 = limiter.allow(limiter_key)

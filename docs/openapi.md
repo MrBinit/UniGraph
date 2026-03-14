@@ -20,66 +20,17 @@ All application routes are mounted under:
 
 ## Endpoints
 
-### `POST /api/v1/chat`
-
-Primary async enqueue endpoint for high-concurrency chat architecture.
-
-Purpose:
-
-- Accept a user prompt
-- Enforce authentication and authorization
-- Create an async job record
-- Push the job to SQS
-- Return `job_id` immediately
-
-Request body:
-
-```json
-{
-  "user_id": "user-1",
-  "prompt": "Find AI research labs at Stanford University"
-}
-```
-
-Request validation:
-
-- `user_id`
-  - required
-  - length `3..128`
-  - pattern: `^[A-Za-z0-9_.:@\\-]+$`
-- `prompt`
-  - required
-  - length `1..8000`
-
-Response body:
-
-```json
-{
-  "job_id": "4d7a9b6d6a5b4cf7b3ef31e3f3468b0b",
-  "status": "queued",
-  "submitted_at": "2026-03-10T10:30:00+00:00"
-}
-```
-
-Status code:
-
-- `202 Accepted`
-
-Security:
-
-- Requires a bearer token unless `auth_enabled` is disabled
-- Caller can access only their own `user_id`, unless they have an admin role
-
 ### `POST /api/v1/chat/stream`
 
-Real-time streaming endpoint over Server-Sent Events (SSE).
+Queue-backed streaming endpoint over Server-Sent Events (SSE).
 
 Purpose:
 
 - Accept a user prompt
 - Enforce authentication and authorization
-- Stream true Bedrock token deltas as they are generated
-- Send terminal `done` or `error` events
+- Enqueue an async chat job to SQS
+- Poll DynamoDB job status
+- Stream queue status plus final response as SSE events
 
 Request body:
 
@@ -97,9 +48,13 @@ Response content type:
 SSE event examples:
 
 ```text
-data: {"type":"chunk","text":"Find"}
+data: {"type":"queued","job_id":"4d7a9b6d6a5b4cf7b3ef31e3f3468b0b","status":"queued","submitted_at":"2026-03-10T10:30:00+00:00"}
 
-data: {"type":"chunk","text":"Find AI research"}
+data: {"type":"status","job_id":"4d7a9b6d6a5b4cf7b3ef31e3f3468b0b","status":"processing"}
+
+data: {"type":"status","job_id":"4d7a9b6d6a5b4cf7b3ef31e3f3468b0b","status":"completed"}
+
+data: {"type":"chunk","text":"Find AI research labs at Stanford University..."}
 
 data: {"type":"done"}
 ```

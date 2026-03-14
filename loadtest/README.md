@@ -96,7 +96,7 @@ The tool prints:
 ## AWS Full-Stack Mode (SQS + Postgres + DynamoDB, No LLM/Embedding API)
 
 Use this mode when you want AWS-backed services involved during load:
-- `/api/v1/chat` async enqueue path
+- `/api/v1/chat/stream` queue-backed SSE path
 - SQS workers (`llm_async_worker`, `metrics_aggregation_worker`)
 - Postgres retrieval path
 - DynamoDB job/metrics writes

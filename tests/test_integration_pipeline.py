@@ -325,25 +325,18 @@ def test_api_to_queue_to_worker_to_memory_update(monkeypatch):
 
     user_token = create_access_token(user_id="user-1", roles=["user"])
     with TestClient(app) as client:
-        chat_response = client.post(
-            "/api/v1/chat",
+        chat_stream_response = client.post(
+            "/api/v1/chat/stream",
             json={"user_id": "user-1", "prompt": "find ai research lab"},
             headers={"Authorization": f"Bearer {user_token}"},
         )
 
-        assert chat_response.status_code == 202
-        payload = chat_response.json()
-        assert payload["job_id"] == "job-0001"
-        assert payload["status"] == "queued"
-
-        chat_status_response = client.get(
-            "/api/v1/chat/job-0001",
-            headers={"Authorization": f"Bearer {user_token}"},
-        )
-        assert chat_status_response.status_code == 200
-        status_payload = chat_status_response.json()
-        assert status_payload["status"] == "completed"
-        assert status_payload["response"] == "assistant-output"
+        assert chat_stream_response.status_code == 200
+        stream_body = chat_stream_response.text
+        assert '"type": "queued"' in stream_body
+        assert '"status": "completed"' in stream_body
+        assert '"type": "chunk"' in stream_body
+        assert '"text": "assistant-output"' in stream_body
 
         jobs = summary_queue_service.read_summary_jobs("worker-1")
         assert len(jobs) == 1

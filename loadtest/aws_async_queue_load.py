@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Load test async /chat queue flow using YAML config.
+"""Load test queue-backed /chat/stream flow using YAML config.
 
-This runner enqueues jobs through /api/v1/chat and polls /api/v1/chat/{job_id}
-until completion, so SQS + worker + DynamoDB paths are exercised.
+This runner calls /api/v1/chat/stream and then polls /api/v1/chat/{job_id}
+for final status accounting, so SQS + worker + DynamoDB paths are exercised.
 """
 
 from __future__ import annotations
@@ -92,6 +92,47 @@ def _http_json(
         return None, {}, str(exc)
 
 
+def _http_sse(
+    *,
+    url: str,
+    token: str,
+    timeout_seconds: float,
+    payload: dict,
+) -> tuple[int | None, list[dict], str]:
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    request = urllib.request.Request(
+        url=url,
+        data=body,
+        method="POST",
+        headers=headers,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+            events: list[dict] = []
+            for line in raw.splitlines():
+                if not line.startswith("data: "):
+                    continue
+                payload_raw = line[len("data: ") :].strip()
+                if not payload_raw:
+                    continue
+                try:
+                    event = json.loads(payload_raw)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(event, dict):
+                    events.append(event)
+            return int(response.getcode()), events, ""
+    except urllib.error.HTTPError as exc:
+        return int(exc.code), [], f"http_error:{exc.code}"
+    except Exception as exc:  # noqa: BLE001
+        return None, [], str(exc)
+
+
 def _enqueue_one(
     *,
     base_url: str,
@@ -102,9 +143,8 @@ def _enqueue_one(
     prompt: str,
 ) -> dict:
     started_at = time.perf_counter()
-    status_code, payload, error = _http_json(
-        method="POST",
-        url=f"{base_url}/api/v1/chat",
+    status_code, events, error = _http_sse(
+        url=f"{base_url}/api/v1/chat/stream",
         token=token,
         timeout_seconds=timeout_seconds,
         payload={
@@ -113,6 +153,21 @@ def _enqueue_one(
             "prompt": prompt,
         },
     )
+    job_id = ""
+    queue_status = ""
+    for event in events:
+        if str(event.get("type", "")).strip().lower() != "queued":
+            continue
+        job_id = str(event.get("job_id", "")).strip()
+        queue_status = str(event.get("status", "")).strip()
+        break
+
+    payload = {}
+    if job_id:
+        payload["job_id"] = job_id
+    if queue_status:
+        payload["status"] = queue_status
+
     latency_ms = (time.perf_counter() - started_at) * 1000.0
     return {
         "status_code": status_code,
@@ -226,7 +281,7 @@ def _accepted_job_ids(enqueue_results: list[dict]) -> list[str]:
     accepted = [
         item
         for item in enqueue_results
-        if item.get("status_code") == 202 and isinstance(item.get("payload"), dict)
+        if item.get("status_code") == 200 and isinstance(item.get("payload"), dict)
     ]
     job_ids = [str(item["payload"].get("job_id", "")).strip() for item in accepted]
     return [job_id for job_id in job_ids if job_id]

@@ -8,7 +8,7 @@ from app.middlewares import backpressure
 from app.middlewares.backpressure import BackpressureMiddleware
 
 
-def _request(path: str = "/api/v1/chat"):
+def _request(path: str = "/api/v1/chat/stream"):
     return SimpleNamespace(
         method="POST",
         url=SimpleNamespace(path=path),

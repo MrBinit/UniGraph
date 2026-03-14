@@ -17,6 +17,7 @@ Files in this folder:
 - `ops.md`: operational status endpoint and the metrics it exposes.
 - `evaluation-pipeline.md`: end-to-end offline evaluation architecture (evidence capture, judge prompts, scoring, storage, reports).
 - `async-chat-sqs.md`: async chat queue architecture (SQS enqueue, worker consumption, DynamoDB result store, APIs).
+- `fastapi-architecture.md`: FastAPI component diagram (middleware, routers, services, workers, and data stores).
 - `load-testing-aws.md`: YAML-driven AWS full-stack load testing (SQS, Postgres, DynamoDB, Redis, workers, result interpretation).
 - `system-overview.md`: concise end-to-end architecture, Bedrock-based generation/retrieval flow, security/scalability, and latest performance snapshot.
 - `strategy.md`: current architecture state and the recommended next build steps.
@@ -35,6 +36,7 @@ Recommended reading order:
 10. `async-io-path.md`
 11. `evaluation-pipeline.md`
 12. `async-chat-sqs.md`
-13. `load-testing-aws.md`
-14. `system-overview.md`
-15. `strategy.md`
+13. `fastapi-architecture.md`
+14. `load-testing-aws.md`
+15. `system-overview.md`
+16. `strategy.md`

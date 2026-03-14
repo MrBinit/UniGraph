@@ -2,7 +2,7 @@
 
 This document describes how to run repeatable load tests that exercise the production-like AWS integration paths:
 
-- API async enqueue path (`POST /api/v1/chat`)
+- API async stream enqueue path (`POST /api/v1/chat/stream`)
 - SQS job queue consumption
 - Postgres retrieval path
 - DynamoDB result and metrics writes
@@ -117,7 +117,7 @@ If the system is stressed or degraded:
 
 - Enqueue may return `429`, `503`, or `500` instead of `202`.
 - Accepted jobs may remain `queued`/`processing` longer.
-- Some jobs may move to `failed` status and return a safe public error on `GET /api/v1/chat/{job_id}`.
+- Some streams may return an error event when jobs move to `failed` status.
 
 ## Practical Notes
 

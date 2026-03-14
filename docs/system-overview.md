@@ -4,7 +4,7 @@
 Queue-aware runtime order (API + worker path):
 
 `User Query`
--> `POST /api/v1/chat`
+-> `POST /api/v1/chat/stream`
 -> `SQS LLM Queue (unigraph-llm-jobs)`
 -> `LLM Worker Dequeue`
 -> `Input Guardrails`
@@ -27,8 +27,8 @@ Queue-aware runtime order (API + worker path):
 Memory-first view:
 `Query` -> `LLM Job Queue` -> `Worker` -> `Short-Term Memory` -> `Long-Term Memory` -> `LLM` -> `Metrics/Evaluation Queues`.
 
-Interactive streaming path (direct, non-queued):
-`POST /api/v1/chat/stream` -> `Guardrails + Memory + Retrieval` -> `Bedrock token stream` -> `SSE chunk events`.
+Interactive streaming path (queue-backed):
+`POST /api/v1/chat/stream` -> `enqueue SQS job` -> `poll DynamoDB status` -> `SSE queued/status events` -> `SSE final chunk event`.
 
 ## 2) Core Architecture
 - Domain: AI backend for university/research discovery.

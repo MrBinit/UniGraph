@@ -49,13 +49,13 @@ else
 fi
 
 if [[ "${RUN_CHAT}" -eq 1 ]]; then
-  echo "[local-smoke] Running one authenticated /chat call..."
+  echo "[local-smoke] Running one authenticated /chat/stream call..."
   TOKEN="$(docker compose --env-file "${ENV_FILE}" "${COMPOSE_ARGS[@]}" run --rm --no-deps api python -m app.scripts.generate_jwt --user-id local-user --roles admin | tail -n 1)"
-  if ! curl --noproxy "*" --max-time 30 -fsS "http://127.0.0.1:${API_PORT:-8000}/api/v1/chat" \
+  if ! curl --noproxy "*" --max-time 30 -fsS "http://127.0.0.1:${API_PORT:-8000}/api/v1/chat/stream" \
     -H "Authorization: Bearer ${TOKEN}" \
     -H "Content-Type: application/json" \
     -d '{"user_id":"local-user","prompt":"Say hello in one short line."}' >/tmp/local-chat.out 2>/tmp/local-chat.err; then
-    echo "[local-smoke] Host /chat call failed; running in-container /chat check."
+    echo "[local-smoke] Host /chat/stream call failed; running in-container /chat/stream check."
     docker compose --env-file "${ENV_FILE}" "${COMPOSE_ARGS[@]}" exec -T -e TOKEN="${TOKEN}" api python - <<'PY'
 import json
 import os
@@ -64,7 +64,7 @@ import urllib.request
 token = os.environ["TOKEN"]
 body = json.dumps({"user_id": "local-user", "prompt": "Say hello in one short line."}).encode()
 req = urllib.request.Request(
-    "http://127.0.0.1:8000/api/v1/chat",
+    "http://127.0.0.1:8000/api/v1/chat/stream",
     data=body,
     headers={
         "Authorization": f"Bearer {token}",

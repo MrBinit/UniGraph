@@ -2,10 +2,11 @@
 
 This document describes the new async chat path:
 
-1. `POST /api/v1/chat` enqueues a job to SQS and returns `job_id`.
+1. `POST /api/v1/chat/stream` enqueues a job to SQS and opens an SSE stream.
 2. Worker (`python -m app.scripts.llm_async_worker`) consumes SQS messages.
 3. Worker runs the existing LLM pipeline and writes job status/result to DynamoDB.
-4. `GET /api/v1/chat/{job_id}` returns queued/processing/completed/failed state.
+4. Stream emits queued/processing/completed events and final chunk.
+5. `GET /api/v1/chat/{job_id}` remains available for direct status polling.
 
 ## Required AWS resources
 
@@ -48,8 +49,8 @@ Allow DynamoDB job status operations on result table:
 
 ## Local/prod run
 
-- enqueue: `POST /api/v1/chat`
-- check status/result: `GET /api/v1/chat/{job_id}`
+- stream enqueue + result: `POST /api/v1/chat/stream`
+- optional status polling: `GET /api/v1/chat/{job_id}`
 
 Run async worker (compose profile):
 
