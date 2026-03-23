@@ -6,9 +6,9 @@ bedrock:
   max_concurrency: 50
   reranker_enabled: true
   reranker_model_id: "cohere.rerank-v3-5:0"
+  reranker_api_version: 2
   reranker_top_n: 2
   reranker_min_documents: 2
   reranker_max_documents: 12
   reranker_max_query_chars: 700
   reranker_max_document_chars: 1400
-

@@ -86,6 +86,23 @@ def _parse_ranked_indices(payload: dict, total_docs: int) -> list[tuple[int, flo
     return ranked
 
 
+def _needs_cohere_api_version(model_id: str) -> bool:
+    return str(model_id).strip().lower().startswith("cohere.rerank")
+
+
+def _reranker_request_body(
+    *, query_text: str, documents: list[str], top_n: int, model_id: str
+) -> dict:
+    body = {
+        "query": query_text,
+        "documents": documents,
+        "top_n": top_n,
+    }
+    if _needs_cohere_api_version(model_id):
+        body["api_version"] = int(getattr(settings.bedrock, "reranker_api_version", 2))
+    return body
+
+
 def _reranker_enabled() -> bool:
     if not settings.bedrock.reranker_enabled:
         return False
@@ -128,14 +145,16 @@ async def arerank_retrieval_results(query: str, candidates: list[dict]) -> dict:
         max(1, int(settings.bedrock.reranker_top_n)),
         len(normalized_results),
     )
+    model_id = str(settings.bedrock.reranker_model_id).strip()
     request_payload = {
-        "modelId": str(settings.bedrock.reranker_model_id).strip(),
+        "modelId": model_id,
         "body": json.dumps(
-            {
-                "query": query_text,
-                "documents": documents,
-                "top_n": top_n,
-            }
+            _reranker_request_body(
+                query_text=query_text,
+                documents=documents,
+                top_n=top_n,
+                model_id=model_id,
+            )
         ),
         "contentType": _JSON_CONTENT_TYPE,
         "accept": _JSON_CONTENT_TYPE,

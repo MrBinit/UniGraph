@@ -8,6 +8,7 @@ class BedrockConfig(BaseModel):
     max_concurrency: int = Field(ge=1, le=1000)
     reranker_enabled: bool = False
     reranker_model_id: str = "cohere.rerank-v3-5:0"
+    reranker_api_version: int = Field(default=2, ge=1, le=20)
     reranker_top_n: int = Field(default=4, ge=1, le=20)
     reranker_min_documents: int = Field(default=2, ge=1, le=100)
     reranker_max_documents: int = Field(default=12, ge=1, le=100)

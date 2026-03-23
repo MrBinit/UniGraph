@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from app.services import reranker_service as service
@@ -16,6 +18,7 @@ async def test_arerank_retrieval_results_returns_passthrough_when_disabled(monke
 async def test_arerank_retrieval_results_sorts_by_ranked_indices(monkeypatch):
     monkeypatch.setattr(service.settings.bedrock, "reranker_enabled", True)
     monkeypatch.setattr(service.settings.bedrock, "reranker_model_id", "cohere.rerank-v3-5:0")
+    monkeypatch.setattr(service.settings.bedrock, "reranker_api_version", 2)
     monkeypatch.setattr(service.settings.bedrock, "reranker_top_n", 2)
     monkeypatch.setattr(service.settings.bedrock, "reranker_min_documents", 2)
     monkeypatch.setattr(service.settings.bedrock, "reranker_max_documents", 10)
@@ -29,6 +32,10 @@ async def test_arerank_retrieval_results_sorts_by_ranked_indices(monkeypatch):
 
     async def _fake_invoke_model_json(payload):
         assert payload["modelId"] == "cohere.rerank-v3-5:0"
+        body = json.loads(payload["body"])
+        assert body["api_version"] == 2
+        assert body["query"] == "best result"
+        assert body["top_n"] == 2
         return {
             "results": [
                 {"index": 2, "relevance_score": 0.91},

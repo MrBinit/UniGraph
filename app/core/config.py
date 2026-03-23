@@ -206,6 +206,7 @@ def _apply_env_overrides(data: dict) -> dict:
     _set(["bedrock", "max_concurrency"], "BEDROCK_MAX_CONCURRENCY", int)
     _set(["bedrock", "reranker_enabled"], "BEDROCK_RERANKER_ENABLED", bool)
     _set(["bedrock", "reranker_model_id"], "BEDROCK_RERANKER_MODEL_ID")
+    _set(["bedrock", "reranker_api_version"], "BEDROCK_RERANKER_API_VERSION", int)
     _set(["bedrock", "reranker_top_n"], "BEDROCK_RERANKER_TOP_N", int)
     _set(["bedrock", "reranker_min_documents"], "BEDROCK_RERANKER_MIN_DOCUMENTS", int)
     _set(["bedrock", "reranker_max_documents"], "BEDROCK_RERANKER_MAX_DOCUMENTS", int)
