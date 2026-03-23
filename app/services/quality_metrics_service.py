@@ -2,8 +2,10 @@ from __future__ import annotations
 import re
 from collections import Counter
 from statistics import mean
+from urllib.parse import urlparse
 
 _TOKEN_PATTERN = re.compile(r"\b\w+\b", re.UNICODE)
+_URL_PATTERN = re.compile(r"https?://[^\s<>\")\]]+")
 
 
 def _tokenize(text: str) -> list[str]:
@@ -78,6 +80,34 @@ def context_coverage_score(answer: str, contexts: list[str]) -> float:
 def hallucination_proxy_score(answer: str, contexts: list[str]) -> float:
     """Proxy hallucination score: 1.0 - context coverage."""
     return 1.0 - context_coverage_score(answer, contexts)
+
+
+def citation_accuracy_score(answer: str, evidence_urls: list[str] | None) -> float:
+    """Return ratio of cited URLs that match the allowed evidence URL hosts."""
+    if not isinstance(answer, str) or not answer.strip():
+        return 0.0
+    allowed_hosts = {
+        str(urlparse(str(url)).netloc or "").strip().lower()
+        for url in (evidence_urls or [])
+        if isinstance(url, str) and str(url).strip()
+    }
+    allowed_hosts = {host for host in allowed_hosts if host}
+    if not allowed_hosts:
+        return 0.0
+
+    cited_urls = _URL_PATTERN.findall(answer)
+    if not cited_urls:
+        return 0.0
+    cited_hosts = [
+        str(urlparse(url).netloc or "").strip().lower()
+        for url in cited_urls
+        if isinstance(url, str)
+    ]
+    cited_hosts = [host for host in cited_hosts if host]
+    if not cited_hosts:
+        return 0.0
+    matching = sum(1 for host in cited_hosts if host in allowed_hosts)
+    return _safe_divide(matching, len(cited_hosts))
 
 
 def _extract_result_identifier(result: dict) -> str | None:
@@ -156,6 +186,7 @@ def generation_metrics(
             contexts.append(content.strip())
 
     metrics["context_coverage"] = context_coverage_score(answer, contexts)
+    metrics["groundedness"] = metrics["context_coverage"]
     metrics["hallucination_proxy"] = hallucination_proxy_score(answer, contexts)
 
     if expected_answer is not None:

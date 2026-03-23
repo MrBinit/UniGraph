@@ -1,5 +1,6 @@
 from app.services.quality_metrics_service import (
     aggregate_metric_rows,
+    citation_accuracy_score,
     generation_metrics,
     retrieval_metrics,
     token_precision_recall_f1,
@@ -57,8 +58,15 @@ def test_generation_metrics_with_expected_answer_and_contexts():
     assert metrics["exact_match"] == 1.0
     assert metrics["token_f1"] == 1.0
     assert metrics["context_coverage"] == 1.0
+    assert metrics["groundedness"] == 1.0
     assert metrics["hallucination_proxy"] == 0.0
     assert metrics["query_relevance"] > 0.5
+
+
+def test_citation_accuracy_score_counts_allowed_hosts():
+    answer = "See https://www.ox.ac.uk/admissions and " "https://www.example.com/post for details."
+    score = citation_accuracy_score(answer, ["https://www.ox.ac.uk/admissions"])
+    assert score == 0.5
 
 
 def test_aggregate_metric_rows_computes_per_key_means():

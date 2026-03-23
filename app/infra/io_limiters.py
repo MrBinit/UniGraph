@@ -10,7 +10,9 @@ _LIMITS: dict[str, asyncio.Semaphore] = {
     "llm": asyncio.Semaphore(settings.io.llm_max_concurrency),
     "embedding": asyncio.Semaphore(settings.io.embedding_max_concurrency),
     "retrieval": asyncio.Semaphore(settings.io.retrieval_max_concurrency),
+    "reranker": asyncio.Semaphore(settings.io.reranker_max_concurrency),
     "redis": asyncio.Semaphore(settings.io.redis_max_concurrency),
+    "serpapi": asyncio.Semaphore(settings.serpapi.max_concurrency),
 }
 
 

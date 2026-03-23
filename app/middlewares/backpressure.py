@@ -155,7 +155,9 @@ class BackpressureMiddleware(BaseHTTPMiddleware):
             if acquired_distributed:
                 await self._release_distributed_slot(
                     redis_token,
-                    warning_message="Failed releasing distributed backpressure token after local reject.",
+                    warning_message=(
+                        "Failed releasing distributed backpressure token after local reject."
+                    ),
                 )
             return self._busy_response(
                 retry_after=retry_after if self._redis_gate is not None else None

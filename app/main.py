@@ -38,47 +38,46 @@ def _configure_logging():
     )
 
 
-def create_app() -> FastAPI:
-    """Create and configure the FastAPI application with routes and middleware."""
-    _configure_logging()
-    validate_security_configuration()
-    docs_enabled = bool(settings.app.docs_enabled)
-    app = FastAPI(
-        title=settings.app.name,
-        docs_url="/docs" if docs_enabled else None,
-        redoc_url="/redoc" if docs_enabled else None,
-        openapi_url="/openapi.json" if docs_enabled else None,
-    )
+def _warm_redis_backend():
+    """Warm Redis connectivity to reduce first-request latency."""
+    try:
+        app_redis_client.ping()
+        logger.info("StartupWarmup | redis=ok")
+    except Exception as exc:
+        logger.warning("StartupWarmup | redis=failed | error=%s", exc)
 
-    @app.get("/healthz", include_in_schema=False)
-    async def healthz():
-        return {"status": "ok"}
 
-    @app.on_event("startup")
-    async def warm_backends():
-        """Warm backend connections during startup to reduce first-request latency."""
-        try:
-            app_redis_client.ping()
-            logger.info("StartupWarmup | redis=ok")
-        except Exception as exc:
-            logger.warning("StartupWarmup | redis=failed | error=%s", exc)
+def _warm_postgres_backend():
+    """Warm Postgres connectivity when enabled."""
+    if not settings.postgres.enabled:
+        return
+    try:
+        pool = get_postgres_pool()
+        with pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+        logger.info("StartupWarmup | postgres=ok")
+    except Exception as exc:
+        logger.warning("StartupWarmup | postgres=failed | error=%s", exc)
 
-        if settings.postgres.enabled:
-            try:
-                pool = get_postgres_pool()
-                with pool.connection() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT 1")
-                logger.info("StartupWarmup | postgres=ok")
-            except Exception as exc:
-                logger.warning("StartupWarmup | postgres=failed | error=%s", exc)
 
+def _register_lifecycle_handlers(app: FastAPI):
+    """Register startup/shutdown handlers."""
+
+    def warm_backends():
+        _warm_redis_backend()
+        _warm_postgres_backend()
         start_offline_eval_scheduler()
 
-    @app.on_event("shutdown")
     async def stop_background_jobs():
         await stop_offline_eval_scheduler()
 
+    app.add_event_handler("startup", warm_backends)
+    app.add_event_handler("shutdown", stop_background_jobs)
+
+
+def _add_enabled_middlewares(app: FastAPI):
+    """Attach configured middlewares."""
     if settings.middleware.enable_route_matching:
         app.add_middleware(RouteMatchingMiddleware)
     if settings.middleware.enable_backpressure:
@@ -106,10 +105,35 @@ def create_app() -> FastAPI:
     if settings.middleware.enable_request_logging:
         app.add_middleware(RequestLoggingMiddleware)
 
+
+def _include_api_routers(app: FastAPI):
+    """Register API routes."""
     app.include_router(chat_router, prefix=API_V1_PREFIX)
     app.include_router(auth_router, prefix=API_V1_PREFIX)
     app.include_router(evaluation_router, prefix=API_V1_PREFIX)
     app.include_router(ops_router, prefix=API_V1_PREFIX)
+
+
+def create_app() -> FastAPI:
+    """Create and configure the FastAPI application with routes and middleware."""
+    _configure_logging()
+    validate_security_configuration()
+    docs_enabled = bool(settings.app.docs_enabled)
+    app = FastAPI(
+        title=settings.app.name,
+        docs_url="/docs" if docs_enabled else None,
+        redoc_url="/redoc" if docs_enabled else None,
+        openapi_url="/openapi.json" if docs_enabled else None,
+    )
+
+    @app.get("/healthz", include_in_schema=False)
+    async def healthz():
+        return {"status": "ok"}
+
+    _register_lifecycle_handlers(app)
+    _add_enabled_middlewares(app)
+    _include_api_routers(app)
+
     if FRONTEND_DIST_DIR.exists():
         app.mount("/ui", StaticFiles(directory=str(FRONTEND_DIST_DIR), html=True), name="ui")
     return app

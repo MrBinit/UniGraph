@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from statistics import mean
 from uuid import uuid4
 
 from app.core.config import get_settings
@@ -9,6 +10,7 @@ from app.core.memory_crypto import decrypt_memory_payload, encrypt_memory_payloa
 from app.infra.redis_client import app_scoped_key, redis_client
 from app.services.quality_metrics_service import (
     aggregate_metric_rows,
+    citation_accuracy_score,
     generation_metrics,
     retrieval_metrics,
 )
@@ -45,6 +47,7 @@ def _safe_payload_results(results: list[dict] | None) -> list[dict]:
             {
                 "chunk_id": result.get("chunk_id", ""),
                 "document_id": result.get("document_id", ""),
+                "source_path": result.get("source_path", ""),
                 "metadata": result.get("metadata", {}),
                 "content": result.get("content", ""),
                 "distance": result.get("distance"),
@@ -61,6 +64,8 @@ def store_chat_trace(
     retrieved_results: list[dict] | None,
     retrieval_strategy: str,
     timings_ms: dict | None,
+    quality: dict | None = None,
+    evidence_urls: list[str] | None = None,
     redis=None,
 ) -> str | None:
     """
@@ -80,9 +85,17 @@ def store_chat_trace(
         "retrieval_strategy": retrieval_strategy,
         "timings_ms": timings_ms or {},
         "retrieved_results": _safe_payload_results(retrieved_results),
+        "quality": quality if isinstance(quality, dict) else {},
+        "evidence_urls": [
+            str(url).strip()
+            for url in (evidence_urls or [])
+            if isinstance(url, str) and str(url).strip()
+        ],
         "labels": {
             "expected_answer": None,
             "relevant_chunk_ids": [],
+            "user_feedback": None,
+            "user_feedback_score": None,
         },
     }
 
@@ -141,6 +154,8 @@ def label_chat_trace(
     conversation_id: str,
     expected_answer: str | None = None,
     relevant_chunk_ids: list[str] | None = None,
+    user_feedback: str | None = None,
+    user_feedback_score: int | None = None,
     redis=None,
 ) -> dict | None:
     """Attach human labels used for stronger retrieval and generation evaluation."""
@@ -161,6 +176,16 @@ def label_chat_trace(
             for chunk_id in relevant_chunk_ids
             if isinstance(chunk_id, str) and chunk_id.strip()
         ]
+    if user_feedback is not None:
+        feedback = str(user_feedback).strip()
+        labels["user_feedback"] = feedback or None
+    if user_feedback_score is not None:
+        try:
+            score = int(user_feedback_score)
+        except (TypeError, ValueError):
+            score = None
+        if score in {-1, 0, 1}:
+            labels["user_feedback_score"] = score
 
     trace["labels"] = labels
     trace_key = _conversation_key(conversation_id)
@@ -192,10 +217,89 @@ def evaluate_trace(trace: dict) -> dict:
         expected_answer=expected_answer if isinstance(expected_answer, str) else None,
         retrieved_results=retrieved_results,
     )
+    evidence_urls = trace.get("evidence_urls", [])
+    if not isinstance(evidence_urls, list):
+        evidence_urls = []
+    quality = trace.get("quality", {})
+    quality = quality if isinstance(quality, dict) else {}
+    citation_accuracy = quality.get("citation_accuracy")
+    if citation_accuracy is None:
+        citation_accuracy = citation_accuracy_score(
+            answer=str(trace.get("answer", "")),
+            evidence_urls=evidence_urls,
+        )
+    try:
+        generation_row["citation_accuracy"] = float(citation_accuracy)
+    except (TypeError, ValueError):
+        generation_row["citation_accuracy"] = 0.0
 
     return {
         "retrieval": retrieval_row,
         "generation": generation_row,
+    }
+
+
+def _trace_source_count(trace: dict) -> int:
+    retrieved_results = trace.get("retrieved_results", [])
+    if not isinstance(retrieved_results, list):
+        return 0
+    sources: set[str] = set()
+    for result in retrieved_results:
+        if not isinstance(result, dict):
+            continue
+        metadata = result.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        url = str(metadata.get("url", "")).strip()
+        source_path = str(result.get("source_path", "")).strip()
+        key = url or source_path
+        if key:
+            sources.add(key.lower())
+    return len(sources)
+
+
+def _web_fallback_summary(traces: list[dict], conversation_rows: list[dict]) -> dict:
+    web_rows = [
+        (trace, row)
+        for trace, row in zip(traces, conversation_rows)
+        if "web_fallback" in str(trace.get("retrieval_strategy", "")).lower()
+    ]
+    if not web_rows:
+        return {
+            "total_web_fallback_answers": 0,
+            "avg_source_count": 0.0,
+            "avg_groundedness": 0.0,
+            "avg_citation_accuracy": 0.0,
+            "feedback_count": 0,
+            "avg_feedback_score": 0.0,
+            "positive_feedback_rate": 0.0,
+        }
+
+    source_counts: list[float] = []
+    groundedness_scores: list[float] = []
+    citation_scores: list[float] = []
+    feedback_scores: list[float] = []
+
+    for trace, row in web_rows:
+        source_counts.append(float(_trace_source_count(trace)))
+        generation = row.get("metrics", {}).get("generation", {})
+        if isinstance(generation, dict):
+            groundedness_scores.append(float(generation.get("groundedness", 0.0)))
+            citation_scores.append(float(generation.get("citation_accuracy", 0.0)))
+        labels = trace.get("labels", {})
+        labels = labels if isinstance(labels, dict) else {}
+        feedback_score = labels.get("user_feedback_score")
+        if feedback_score in {-1, 0, 1}:
+            feedback_scores.append(float(feedback_score))
+
+    positive = sum(1 for score in feedback_scores if score > 0)
+    return {
+        "total_web_fallback_answers": len(web_rows),
+        "avg_source_count": mean(source_counts) if source_counts else 0.0,
+        "avg_groundedness": mean(groundedness_scores) if groundedness_scores else 0.0,
+        "avg_citation_accuracy": mean(citation_scores) if citation_scores else 0.0,
+        "feedback_count": len(feedback_scores),
+        "avg_feedback_score": mean(feedback_scores) if feedback_scores else 0.0,
+        "positive_feedback_rate": (positive / len(feedback_scores)) if feedback_scores else 0.0,
     }
 
 
@@ -216,7 +320,10 @@ def get_user_evaluation_report(user_id: str, *, limit: int = 50, redis=None) -> 
 
         labels = trace.get("labels", {})
         if isinstance(labels, dict) and (
-            labels.get("expected_answer") or labels.get("relevant_chunk_ids")
+            labels.get("expected_answer")
+            or labels.get("relevant_chunk_ids")
+            or labels.get("user_feedback")
+            or labels.get("user_feedback_score") is not None
         ):
             labeled_count += 1
 
@@ -239,5 +346,6 @@ def get_user_evaluation_report(user_id: str, *, limit: int = 50, redis=None) -> 
         "labeled_conversations": labeled_count,
         "retrieval_metrics": aggregate_metric_rows(retrieval_rows),
         "generation_metrics": aggregate_metric_rows(generation_rows),
+        "web_fallback_metrics": _web_fallback_summary(traces, conversation_rows),
         "conversations": conversation_rows,
     }

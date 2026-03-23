@@ -303,6 +303,7 @@ def test_api_to_queue_to_worker_to_memory_update(monkeypatch):
 
     monkeypatch.setattr(llm_service, "_call_primary", fake_primary)
     monkeypatch.setattr(llm_service, "aretrieve_document_chunks", fake_retrieval)
+    monkeypatch.setattr(llm_service, "_is_citation_grounding_required", lambda: False)
     monkeypatch.setattr(llm_service, "_persist_evaluation_trace", _fake_noop)
     monkeypatch.setattr(llm_service, "_record_json_metrics", _fake_noop)
     monkeypatch.setattr(summary_worker_service, "summarize_messages", fake_summary)

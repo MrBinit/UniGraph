@@ -69,7 +69,8 @@ def test_recursive_chunk_text_avoids_mid_word_hard_cuts():
 def test_recursive_chunk_text_merges_tiny_heading_chunk_into_next_chunk():
     text = (
         "Master of Science in Artificial Intelligence\n\n"
-        "This paragraph contains the actual content for the program and should stay with its heading."
+        "This paragraph contains the actual content for the program "
+        "and should stay with its heading."
     )
 
     chunks = recursive_chunk_text(

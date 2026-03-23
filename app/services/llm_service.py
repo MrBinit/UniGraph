@@ -3,9 +3,11 @@ import hashlib
 import inspect
 import logging
 import os
+import re
 import time
 from types import SimpleNamespace
 from typing import AsyncIterator
+from urllib.parse import urlparse
 from uuid import uuid4
 from redis.exceptions import RedisError
 from app.core.config import get_prompts, get_settings
@@ -20,8 +22,11 @@ from app.services.guardrails_service import (
     refusal_response,
 )
 from app.services.memory_service import build_context, update_memory
+from app.services.quality_metrics_service import citation_accuracy_score, generation_metrics
+from app.services.reranker_service import arerank_retrieval_results
 from app.services.sqs_event_queue_service import enqueue_metrics_record_event
 from app.services.retrieval_service import aretrieve_document_chunks
+from app.services.web_retrieval_service import aretrieve_web_chunks
 
 settings = get_settings()
 prompts = get_prompts()
@@ -31,15 +36,17 @@ _BACKGROUND_TASKS: set[asyncio.Task] = set()
 _RETRIEVAL_QUERY_MAX_CHARS = 900
 _RETRIEVAL_CONTEXT_MAX_CHARS = 1500
 _RETRIEVAL_CHUNK_MAX_CHARS = 360
-_RETRIEVAL_MAX_PROMPT_RESULTS = 2
+_RETRIEVAL_MAX_PROMPT_RESULTS = 3
 _RETRIEVAL_EVIDENCE_MAX_ITEMS = 3
 _RETRIEVAL_EVIDENCE_CONTENT_MAX_CHARS = 700
+_CITATION_URL_RE = re.compile(r"https?://[^\s<>\")\]]+")
 _STREAM_GUARD_HOLDBACK_CHARS = 120
 _LLM_MOCK_MODE_ENV = "LLM_MOCK_MODE"
 _LLM_MOCK_TEXT_ENV = "LLM_MOCK_TEXT"
 _LLM_MOCK_DELAY_MS_ENV = "LLM_MOCK_DELAY_MS"
 _LLM_MOCK_STREAM_CHUNK_CHARS_ENV = "LLM_MOCK_STREAM_CHUNK_CHARS"
 _RETRIEVAL_DISABLED_ENV = "RETRIEVAL_DISABLED"
+_NO_RELEVANT_INFORMATION_DETAIL = "Sorry, no relevant information is found."
 
 
 def _chat_cache_key(user_id: str, prompt: str, session_id: str | None = None) -> str:
@@ -86,9 +93,29 @@ def _safe_int(value) -> int | None:
         return None
 
 
+def _safe_float(value) -> float | None:
+    """Convert a numeric-like value to float when possible."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _truthy_env(name: str) -> bool:
     """Parse one boolean feature flag from environment variables."""
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _is_citation_grounding_required() -> bool:
+    chat_config = prompts.get("chat", {})
+    if not isinstance(chat_config, dict):
+        return True
+    raw = chat_config.get("citation_grounded_required", True)
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(raw)
 
 
 def _llm_mock_delay_seconds() -> float:
@@ -232,6 +259,12 @@ def _build_json_metrics_record(
         "retrieval": {
             "strategy": str(state.get("retrieval_strategy", "none")),
             "result_count": int(state.get("retrieved_count", 0)),
+            "source_count": int(state.get("retrieval_source_count", 0)),
+            "top_similarity": state.get("retrieval_top_similarity"),
+            "reranker_applied": bool(state.get("retrieval_reranker_applied", False)),
+            "reranker_ms": state.get("retrieval_reranker_ms"),
+            "citation_required": bool(state.get("citation_required", False)),
+            "evidence_urls": state.get("evidence_urls") or [],
             "evidence": state.get("retrieval_evidence") or [],
         },
         "quality": state.get("quality", {}),
@@ -350,6 +383,11 @@ def _retrieval_content_and_metadata(result) -> tuple[str, dict]:
     return content, metadata if isinstance(metadata, dict) else {}
 
 
+def _prompt_retrieval_result_limit() -> int:
+    reranker_target = max(3, min(6, int(settings.bedrock.reranker_top_n)))
+    return max(_RETRIEVAL_MAX_PROMPT_RESULTS, reranker_target)
+
+
 def _format_retrieval_context(retrieval_result: dict) -> dict | None:
     """Convert retrieved long-term chunks into a single system-context message."""
     results = retrieval_result.get("results", []) if isinstance(retrieval_result, dict) else []
@@ -359,6 +397,7 @@ def _format_retrieval_context(retrieval_result: dict) -> dict | None:
     lines = [
         "Retrieved long-term knowledge. Use this only when relevant to the user's request.",
     ]
+    max_items = _prompt_retrieval_result_limit()
     seen_chunks: set[str] = set()
     used_results = 0
     for result in results:
@@ -374,12 +413,326 @@ def _format_retrieval_context(retrieval_result: dict) -> dict | None:
         label = _retrieval_result_label(metadata, used_results)
         compact_content = " ".join(content.split())[:_RETRIEVAL_CHUNK_MAX_CHARS]
         lines.append(f"{used_results}. {label}: {compact_content}")
-        if used_results >= _RETRIEVAL_MAX_PROMPT_RESULTS:
+        if used_results >= max_items:
             break
 
     if len(lines) == 1:
         return None
     joined = "\n".join(lines)
+    return {"role": "system", "content": joined[:_RETRIEVAL_CONTEXT_MAX_CHARS]}
+
+
+def _serpapi_key_present() -> bool:
+    env_name = str(settings.serpapi.api_key_env_name).strip() or "SERPAPI_API_KEY"
+    return bool(os.getenv(env_name, "").strip())
+
+
+def _result_similarity(result: dict) -> float | None:
+    """Derive a normalized similarity score [0,1] from retrieval metadata."""
+    if not isinstance(result, dict):
+        return None
+
+    explicit_similarity = _safe_float(result.get("similarity"))
+    if explicit_similarity is not None:
+        return max(0.0, min(1.0, explicit_similarity))
+
+    score = _safe_float(result.get("score"))
+    if score is not None and 0.0 <= score <= 1.0:
+        return score
+
+    distance = _safe_float(result.get("distance"))
+    if distance is None:
+        return None
+    return max(0.0, min(1.0, 1.0 - distance))
+
+
+def _top_retrieval_similarity(results: list[dict]) -> float | None:
+    """Return best similarity score among retrieval results when available."""
+    if not isinstance(results, list) or not results:
+        return None
+    best: float | None = None
+    for result in results:
+        similarity = _result_similarity(result)
+        if similarity is None:
+            continue
+        if best is None or similarity > best:
+            best = similarity
+    return best
+
+
+def _merge_retrieval_results(
+    primary: list[dict], secondary: list[dict], *, limit: int
+) -> list[dict]:
+    """Merge retrieval candidates while deduping by stable identity/content keys."""
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for result in list(primary or []) + list(secondary or []):
+        if not isinstance(result, dict):
+            continue
+        chunk_id = str(result.get("chunk_id", "")).strip()
+        source_path = str(result.get("source_path", "")).strip()
+        content = " ".join(str(result.get("content", "")).split()).lower()[:220]
+        key = chunk_id or source_path or content
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        merged.append(result)
+        if len(merged) >= max(1, int(limit)):
+            break
+    return merged
+
+
+def _should_use_web_fallback(state: dict, top_similarity: float | None = None) -> bool:
+    if not settings.serpapi.enabled:
+        return False
+    if not settings.serpapi.fallback_enabled:
+        return False
+    if not _serpapi_key_present():
+        return False
+    if int(state.get("retrieved_count", 0) or 0) <= 0:
+        return True
+    if top_similarity is None:
+        return False
+    return top_similarity < float(settings.serpapi.fallback_similarity_threshold)
+
+
+def _result_dicts(rows) -> list[dict]:
+    if not isinstance(rows, list):
+        return []
+    return [item for item in rows if isinstance(item, dict)]
+
+
+def _set_retrieval_state(state: dict, results: list[dict]) -> None:
+    state["retrieved_results"] = results
+    state["retrieved_count"] = len(results)
+    state["retrieval_source_count"] = _retrieval_source_count(results)
+    state["retrieval_evidence"] = _build_retrieval_evidence(results)
+
+
+async def _retrieve_vector_candidates(
+    retrieval_query: str,
+    state: dict,
+) -> tuple[list[dict], float | None]:
+    retrieval_result = await aretrieve_document_chunks(
+        retrieval_query,
+        top_k=settings.postgres.default_top_k,
+    )
+    state["retrieval_strategy"] = str(retrieval_result.get("retrieval_strategy", "unknown"))
+    vector_results = _result_dicts(retrieval_result.get("results", []))
+    top_similarity = _top_retrieval_similarity(vector_results)
+    state["retrieval_top_similarity"] = top_similarity
+    _set_retrieval_state(state, vector_results)
+    return vector_results, top_similarity
+
+
+async def _retrieve_web_candidates_if_needed(
+    retrieval_query: str,
+    *,
+    vector_results: list[dict],
+    top_similarity: float | None,
+    state: dict,
+) -> tuple[list[dict], bool]:
+    if not _should_use_web_fallback(state, top_similarity):
+        return [], False
+
+    if vector_results:
+        state["retrieval_strategy"] = "vector_low_confidence"
+
+    try:
+        web_result = await aretrieve_web_chunks(
+            retrieval_query,
+            top_k=settings.postgres.default_top_k,
+        )
+        web_results = _result_dicts(web_result.get("results", []))
+        if web_results:
+            state["retrieval_strategy"] = "web_fallback"
+        return web_results, True
+    except Exception as web_exc:
+        state["retrieval_strategy"] = "web_fallback_error"
+        logger.warning(
+            "Web fallback retrieval failed; continuing without web context. %s",
+            web_exc,
+        )
+        return [], True
+
+
+def _merge_vector_and_web_results(
+    vector_results: list[dict], web_results: list[dict]
+) -> list[dict]:
+    if not web_results:
+        return vector_results
+
+    merge_limit = max(
+        int(settings.postgres.default_top_k),
+        int(settings.serpapi.max_context_results),
+        int(settings.bedrock.reranker_max_documents),
+    )
+    return _merge_retrieval_results(
+        vector_results,
+        web_results,
+        limit=merge_limit,
+    )
+
+
+async def _rerank_if_configured(
+    retrieval_query: str,
+    merged_results: list[dict],
+    state: dict,
+) -> list[dict]:
+    if not merged_results:
+        return merged_results
+
+    try:
+        rerank_result = await arerank_retrieval_results(retrieval_query, merged_results)
+        reranked_rows = _result_dicts(rerank_result.get("results", []))
+        if reranked_rows:
+            merged_results = reranked_rows
+        state["retrieval_reranker_applied"] = bool(rerank_result.get("applied", False))
+        timings = rerank_result.get("timings_ms", {})
+        if isinstance(timings, dict):
+            state["retrieval_reranker_ms"] = _safe_int(timings.get("total"))
+        if state["retrieval_reranker_applied"]:
+            strategy = str(state.get("retrieval_strategy", "")).strip() or "retrieval"
+            state["retrieval_strategy"] = f"{strategy}_reranked"
+    except Exception as rerank_exc:
+        logger.warning(
+            "Reranker failed; using non-reranked retrieval order. %s",
+            rerank_exc,
+        )
+    return merged_results
+
+
+def _apply_grounded_retrieval_context(
+    *,
+    messages: list,
+    merged_results: list[dict],
+    used_web_results: bool,
+    state: dict,
+) -> tuple[list | None, str | None]:
+    if not merged_results:
+        return messages, None
+
+    _set_retrieval_state(state, merged_results)
+    evidence_urls = _evidence_urls(merged_results)
+    state["evidence_urls"] = evidence_urls
+    state["citation_required"] = True
+    if not evidence_urls:
+        state["context_guard_reason"] = "weak_evidence_no_urls"
+        return None, _NO_RELEVANT_INFORMATION_DETAIL
+
+    context_message = (
+        _format_web_retrieval_context({"results": merged_results})
+        if used_web_results
+        else _format_retrieval_context({"results": merged_results})
+    )
+    if not context_message:
+        state["context_guard_reason"] = "weak_evidence_empty_context"
+        return None, _NO_RELEVANT_INFORMATION_DETAIL
+
+    return [
+        _citation_grounding_message(evidence_urls),
+        context_message,
+    ] + messages, None
+
+
+async def _augment_messages_with_retrieval(
+    *,
+    messages: list,
+    retrieval_query: str,
+    state: dict,
+) -> tuple[list | None, str | None]:
+    retrieval_started_at = time.perf_counter()
+    try:
+        vector_results, top_similarity = await _retrieve_vector_candidates(retrieval_query, state)
+        web_results, web_fallback_attempted = await _retrieve_web_candidates_if_needed(
+            retrieval_query,
+            vector_results=vector_results,
+            top_similarity=top_similarity,
+            state=state,
+        )
+        if web_fallback_attempted and not web_results:
+            state["context_guard_reason"] = "no_relevant_information"
+            return None, _NO_RELEVANT_INFORMATION_DETAIL
+
+        merged_results = _merge_vector_and_web_results(vector_results, web_results)
+        merged_results = await _rerank_if_configured(retrieval_query, merged_results, state)
+        return _apply_grounded_retrieval_context(
+            messages=messages,
+            merged_results=merged_results,
+            used_web_results=bool(web_results),
+            state=state,
+        )
+    except Exception as exc:
+        state["retrieval_strategy"] = "error"
+        logger.warning(
+            "Long-term retrieval failed; continuing without retrieved context. %s",
+            exc,
+        )
+        return messages, None
+    finally:
+        state["retrieval_ms"] = _elapsed_ms(retrieval_started_at)
+
+
+def _validate_citation_grounding_state(state: dict) -> str | None:
+    if not _is_citation_grounding_required():
+        return None
+    if not bool(state.get("citation_required", False)):
+        state["context_guard_reason"] = "weak_evidence_missing"
+        return _NO_RELEVANT_INFORMATION_DETAIL
+    evidence_urls = state.get("evidence_urls", [])
+    if not isinstance(evidence_urls, list) or not evidence_urls:
+        state["context_guard_reason"] = "weak_evidence_no_urls"
+        return _NO_RELEVANT_INFORMATION_DETAIL
+    return None
+
+
+def _web_context_line(result: dict, index: int) -> str | None:
+    content = str(result.get("content", "")).strip()
+    if not content:
+        return None
+
+    metadata = result.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    title = str(metadata.get("university", "")).strip() or f"Web Result {index}"
+    url = str(metadata.get("url", "")).strip()
+    compact = " ".join(content.split())[:_RETRIEVAL_CHUNK_MAX_CHARS]
+    if url:
+        return f"{index}. {title} ({url}): {compact}"
+    return f"{index}. {title}: {compact}"
+
+
+def _web_context_result_lines(results: list[dict], *, max_items: int) -> list[str]:
+    lines: list[str] = []
+    used = 0
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        line = _web_context_line(result, used + 1)
+        if not line:
+            continue
+        lines.append(line)
+        used += 1
+        if used >= max_items:
+            break
+    return lines
+
+
+def _format_web_retrieval_context(web_result: dict) -> dict | None:
+    """Convert web fallback results into one system context message with URLs."""
+    results = web_result.get("results", []) if isinstance(web_result, dict) else []
+    if not isinstance(results, list) or not results:
+        return None
+
+    header = [
+        "Live web fallback context (Google via SerpAPI). Use only if relevant and cite URLs.",
+    ]
+    result_lines = _web_context_result_lines(
+        results,
+        max_items=_prompt_retrieval_result_limit(),
+    )
+    if not result_lines:
+        return None
+    joined = "\n".join(header + result_lines)
     return {"role": "system", "content": joined[:_RETRIEVAL_CONTEXT_MAX_CHARS]}
 
 
@@ -410,6 +763,107 @@ def _build_retrieval_evidence(results: list[dict]) -> list[dict]:
     return evidence
 
 
+def _normalized_url(url: str) -> str:
+    value = str(url or "").strip()
+    if not value:
+        return ""
+    parsed = urlparse(value)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return value
+    return ""
+
+
+def _evidence_urls(results: list[dict]) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        metadata = result.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        candidates = [
+            metadata.get("url", ""),
+            result.get("source_path", ""),
+        ]
+        for candidate in candidates:
+            normalized = _normalized_url(str(candidate))
+            if not normalized:
+                continue
+            key = normalized.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            urls.append(normalized)
+    return urls
+
+
+def _retrieval_source_count(results: list[dict]) -> int:
+    seen: set[str] = set()
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        metadata = result.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        url = _normalized_url(str(metadata.get("url", "")))
+        source_path = str(result.get("source_path", "")).strip()
+        key = (url or source_path).strip().lower()
+        if not key:
+            continue
+        seen.add(key)
+    return len(seen)
+
+
+def _citation_grounding_message(evidence_urls: list[str]) -> dict:
+    lines = [
+        "Citation policy:",
+        "- Answer only using provided evidence.",
+        "- Cite URLs explicitly in your answer for every factual claim.",
+        f"- If evidence is insufficient, respond exactly: {_NO_RELEVANT_INFORMATION_DETAIL}",
+        "Allowed evidence URLs:",
+    ]
+    for index, url in enumerate(evidence_urls, start=1):
+        lines.append(f"{index}. {url}")
+        if index >= 12:
+            break
+    return {"role": "system", "content": "\n".join(lines)[:_RETRIEVAL_CONTEXT_MAX_CHARS]}
+
+
+def _response_has_allowed_citation(text: str, evidence_urls: list[str]) -> bool:
+    if not text or not evidence_urls:
+        return False
+    allowed_hosts = {
+        str(urlparse(url).netloc or "").strip().lower()
+        for url in evidence_urls
+        if _normalized_url(url)
+    }
+    if not allowed_hosts:
+        return False
+    cited_urls = _CITATION_URL_RE.findall(str(text))
+    for cited_url in cited_urls:
+        host = str(urlparse(cited_url).netloc or "").strip().lower()
+        if host and host in allowed_hosts:
+            return True
+    return False
+
+
+def _enforce_citation_grounding(result: str, state: dict) -> str:
+    citation_required = bool(state.get("citation_required", False))
+    if not citation_required and not _is_citation_grounding_required():
+        return result
+    if not citation_required:
+        state["output_guard_reason"] = "weak_evidence_missing"
+        return _NO_RELEVANT_INFORMATION_DETAIL
+    evidence_urls = state.get("evidence_urls", [])
+    evidence_urls = evidence_urls if isinstance(evidence_urls, list) else []
+    if not evidence_urls:
+        state["output_guard_reason"] = "weak_evidence_no_urls"
+        return _NO_RELEVANT_INFORMATION_DETAIL
+    if _response_has_allowed_citation(result, evidence_urls):
+        return result
+    state["output_guard_reason"] = "missing_citations"
+    return _NO_RELEVANT_INFORMATION_DETAIL
+
+
 def _track_background_task(task: asyncio.Task, *, label: str) -> None:
     """Track and log fire-and-forget tasks so they are not silently lost."""
     _BACKGROUND_TASKS.add(task)
@@ -434,6 +888,8 @@ async def _persist_evaluation_trace(
     build_context_ms: int,
     retrieval_ms: int,
     model_ms: int,
+    quality: dict,
+    evidence_urls: list[str],
 ) -> None:
     """Persist evaluation traces outside the request critical path."""
     await asyncio.to_thread(
@@ -448,6 +904,8 @@ async def _persist_evaluation_trace(
             "retrieval": retrieval_ms,
             "model": model_ms,
         },
+        quality=quality,
+        evidence_urls=evidence_urls,
         redis=redis_client,
     )
 
@@ -524,8 +982,14 @@ def _new_metrics_state() -> dict:
         "evaluation_trace_ms": None,
         "retrieval_strategy": "none",
         "retrieved_count": 0,
+        "retrieval_source_count": 0,
+        "retrieval_top_similarity": None,
+        "retrieval_reranker_applied": False,
+        "retrieval_reranker_ms": None,
         "retrieved_results": [],
         "retrieval_evidence": [],
+        "citation_required": False,
+        "evidence_urls": [],
         "llm_usage": {},
         "quality": {},
         "input_guard_reason": "",
@@ -591,31 +1055,19 @@ async def _prepare_messages_for_model(
         state["retrieval_strategy"] = "disabled"
         state["retrieval_ms"] = 0
     elif retrieval_query:
-        retrieval_started_at = time.perf_counter()
-        try:
-            retrieval_result = await aretrieve_document_chunks(
-                retrieval_query,
-                top_k=settings.postgres.default_top_k,
-            )
-            state["retrieval_strategy"] = str(retrieval_result.get("retrieval_strategy", "unknown"))
-            results = retrieval_result.get("results", [])
-            if isinstance(results, list):
-                state["retrieved_results"] = results
-                state["retrieved_count"] = len(results)
-                state["retrieval_evidence"] = _build_retrieval_evidence(results)
-            retrieval_message = _format_retrieval_context(retrieval_result)
-            if retrieval_message:
-                messages = [retrieval_message] + messages
-        except Exception as exc:
-            state["retrieval_strategy"] = "error"
-            logger.warning(
-                "Long-term retrieval failed; continuing without retrieved context. %s",
-                exc,
-            )
-        finally:
-            state["retrieval_ms"] = _elapsed_ms(retrieval_started_at)
+        messages, detail = await _augment_messages_with_retrieval(
+            messages=messages,
+            retrieval_query=retrieval_query,
+            state=state,
+        )
+        if detail:
+            return None, detail
     else:
         state["retrieval_ms"] = 0
+
+    citation_detail = _validate_citation_grounding_state(state)
+    if citation_detail:
+        return None, citation_detail
 
     chat_system_prompt = prompts.get("chat", {}).get("system_prompt", "")
     if isinstance(chat_system_prompt, str) and chat_system_prompt.strip():
@@ -662,7 +1114,7 @@ def _extract_guarded_result(*, user_id: str, raw_result, state: dict) -> str:
             user_id,
             state["output_guard_reason"],
         )
-    return result
+    return _enforce_citation_grounding(str(result), state)
 
 
 async def _update_memory_with_timing(
@@ -692,6 +1144,21 @@ async def _write_cache_with_timing(*, cache_key: str, result: str, state: dict) 
         state["cache_write_ms"] = _elapsed_ms(started_at)
 
 
+def _compute_quality_metrics(*, query: str, answer: str, state: dict) -> dict:
+    retrieved_results = state.get("retrieved_results", [])
+    retrieved_results = retrieved_results if isinstance(retrieved_results, list) else []
+    quality = generation_metrics(
+        query=query,
+        answer=answer,
+        retrieved_results=retrieved_results,
+    )
+    evidence_urls = state.get("evidence_urls", [])
+    evidence_urls = evidence_urls if isinstance(evidence_urls, list) else []
+    quality["citation_accuracy"] = citation_accuracy_score(answer, evidence_urls)
+    quality["source_count"] = float(state.get("retrieval_source_count", 0) or 0)
+    return quality
+
+
 def _schedule_evaluation_trace(*, user_id: str, user_prompt: str, result: str, state: dict) -> None:
     started_at = time.perf_counter()
     _track_background_task(
@@ -705,6 +1172,8 @@ def _schedule_evaluation_trace(*, user_id: str, user_prompt: str, result: str, s
                 build_context_ms=state["build_context_ms"] or 0,
                 retrieval_ms=state["retrieval_ms"] or 0,
                 model_ms=state["model_ms"] or 0,
+                quality=state["quality"],
+                evidence_urls=state.get("evidence_urls", []),
             )
         ),
         label="Evaluation trace persistence",
@@ -723,7 +1192,6 @@ async def _record_success_metrics(
     result: str,
     state: dict,
 ) -> None:
-    state["quality"] = {}
     await _record_pipeline_stage_metrics(
         build_context_ms=state["build_context_ms"] or 0,
         retrieval_ms=state["retrieval_ms"] or 0,
@@ -1019,6 +1487,11 @@ async def _prepare_request(
 
 async def _finalize_success(context: dict, result: str) -> None:
     state = context["state"]
+    state["quality"] = _compute_quality_metrics(
+        query=str(context["safe_user_prompt"]),
+        answer=result,
+        state=state,
+    )
     await _update_memory_with_timing(
         conversation_user_id=str(context["conversation_user_id"]),
         safe_user_prompt=str(context["safe_user_prompt"]),
@@ -1129,4 +1602,9 @@ async def generate_response_stream(
             user_id,
             state["output_guard_reason"],
         )
+    grounded_result = _enforce_citation_grounding(result, state)
+    if grounded_result != result:
+        result = grounded_result
+        if result != str(runtime["streamed_text"]):
+            yield result
     await _finalize_success(context, result)

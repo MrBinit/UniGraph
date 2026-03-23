@@ -11,6 +11,8 @@ class EvaluationConversationLabelRequest(BaseModel):
     )
     expected_answer: str | None = Field(default=None, min_length=1, max_length=12000)
     relevant_chunk_ids: list[str] | None = Field(default=None, max_length=200)
+    user_feedback: str | None = Field(default=None, min_length=1, max_length=2000)
+    user_feedback_score: int | None = Field(default=None, ge=-1, le=1)
 
 
 class EvaluationConversationItem(BaseModel):
@@ -48,6 +50,7 @@ class EvaluationReportResponse(BaseModel):
     labeled_conversations: int = Field(ge=0)
     retrieval_metrics: dict = Field(default_factory=dict)
     generation_metrics: dict = Field(default_factory=dict)
+    web_fallback_metrics: dict = Field(default_factory=dict)
     conversations: list[EvaluationConversationItem] = Field(default_factory=list)
 
 

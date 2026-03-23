@@ -12,6 +12,8 @@ Queue-aware runtime order (API + worker path):
 -> `Response Cache Lookup`
 -> `Short-Term Memory Build (summary + recent turns + new query)`
 -> `Long-Term Retrieval (Bedrock embedding + pgvector top_k=2)`
+-> `Confidence Gate (vector similarity)`
+-> `Website Fallback (SerpAPI Google + async page fetch, only when needed)`
 -> `LLM Message Assembly (chat prompt + retrieved context + short-term context)`
 -> `Context Guardrails`
 -> `LLM Call (AWS Bedrock primary, fallback on failure)`
@@ -49,6 +51,7 @@ Interactive streaming path (queue-backed):
   - `app:cache:chat:{user_id}:sha256:{sanitized_prompt_hash}`
   - embedding cache
 - Current model path: retrieval embedding + generation both run on AWS Bedrock.
+- Website fallback search path: SerpAPI Google query variants + domain filtering + cleaned page chunks.
 
 ## 3) DynamoDB Metrics Storage (AWS)
 Request and aggregate metrics are persisted to DynamoDB in addition to JSON files.
@@ -61,6 +64,7 @@ Per-request top-level attributes include:
 - `request_id`, `timestamp`, `user_id`, `session_id`
 - `query`, `answer`, `outcome`
 - `latency_overall_ms`, `latency_llm_ms`, `retrieval_strategy`
+- `retrieval_source_count`, `groundedness`, `citation_accuracy`
 - `prompt_tokens`, `total_tokens`
 - `query_char_count`, `query_truncated`, `answer_char_count`, `answer_truncated`
 - `retrieval_evidence_json` (bounded evidence snapshot for offline evaluation)
@@ -171,3 +175,22 @@ Prompts and model:
   - Coverage: 80.6%
   - Duplications: 0.0%
   - Security Hotspots: 0 (review rating A)
+
+## 10) Website Search API (SerpAPI)
+Reference: `docs/website-search.md`
+
+Implemented behavior:
+- Vector-first retrieval with confidence gate; web fallback runs only when vector evidence is missing/weak.
+- SerpAPI multi-query retrieval with async batch execution.
+- Optional domain allowlist filtering (`.de`, `.eu`, etc.).
+- Async top-page fetch, boilerplate stripping, clean chunking, and near-duplicate chunk removal.
+- Citation-grounded response policy:
+  - answer only from provided evidence,
+  - cite URLs,
+  - abstain (`Sorry, no relevant information is found.`) when evidence is weak or citations are missing.
+- Web fallback evaluation now tracks:
+  - retrieval strategy,
+  - source count,
+  - groundedness,
+  - citation accuracy,
+  - user feedback.

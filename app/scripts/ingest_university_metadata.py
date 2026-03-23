@@ -4,7 +4,9 @@ from app.services.university_metadata_ingestion_service import ingest_university
 
 def main():
     """Ingest one university metadata payload JSON file into Postgres."""
-    parser = argparse.ArgumentParser(description="Ingest university metadata payload into Postgres.")
+    parser = argparse.ArgumentParser(
+        description="Ingest university metadata payload into Postgres."
+    )
     parser.add_argument("payload_path", help="Path to the metadata JSON payload.")
     args = parser.parse_args()
 

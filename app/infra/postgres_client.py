@@ -57,7 +57,7 @@ def get_postgres_pool():
     return _POOL
 
 
-def get_async_postgres_pool():
+async def get_async_postgres_pool():
     """Return the shared async Postgres pool, creating it on first use."""
     global _ASYNC_POOL
 
@@ -77,7 +77,10 @@ def get_async_postgres_pool():
             min_size=settings.postgres.min_pool_size,
             max_size=settings.postgres.max_pool_size,
             kwargs={"row_factory": dict_row},
+            open=False,
         )
+    if _ASYNC_POOL.closed:
+        await _ASYNC_POOL.open()
     return _ASYNC_POOL
 
 

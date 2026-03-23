@@ -79,6 +79,8 @@ async def label_eval_conversation(
         conversation_id=conversation_id,
         expected_answer=request.expected_answer,
         relevant_chunk_ids=request.relevant_chunk_ids,
+        user_feedback=request.user_feedback,
+        user_feedback_score=request.user_feedback_score,
     )
     if not trace:
         raise HTTPException(

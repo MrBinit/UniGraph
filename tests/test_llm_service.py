@@ -2,6 +2,8 @@ import hashlib
 import pytest
 from app.services import llm_service
 
+_REAL_ENFORCE_CITATION_GROUNDING = llm_service._enforce_citation_grounding
+
 
 @pytest.fixture(autouse=True)
 def _stub_json_metrics(monkeypatch):
@@ -9,6 +11,35 @@ def _stub_json_metrics(monkeypatch):
         return None
 
     monkeypatch.setattr(llm_service, "_record_json_metrics", noop)
+
+
+@pytest.fixture(autouse=True)
+def _stub_reranker(monkeypatch):
+    async def passthrough(_query, candidates):
+        return {"results": candidates, "applied": False, "timings_ms": {"total": 0}}
+
+    monkeypatch.setattr(llm_service, "arerank_retrieval_results", passthrough)
+
+
+@pytest.fixture(autouse=True)
+def _stub_evidence_urls(monkeypatch):
+    monkeypatch.setattr(
+        llm_service,
+        "_evidence_urls",
+        lambda results: (
+            ["https://example.edu/evidence"] if isinstance(results, list) and results else []
+        ),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _stub_citation_enforcement(monkeypatch):
+    monkeypatch.setattr(llm_service, "_enforce_citation_grounding", lambda result, _state: result)
+
+
+@pytest.fixture(autouse=True)
+def _stub_citation_grounding_policy(monkeypatch):
+    monkeypatch.setattr(llm_service, "_is_citation_grounding_required", lambda: False)
 
 
 class FakeRedis:
@@ -118,7 +149,10 @@ async def test_generate_response_uses_primary_and_updates_memory(monkeypatch):
         return {
             "results": [
                 {
-                    "content": "Distributed Security Systems Lab focuses on scalable and secure AI infrastructure.",
+                    "content": (
+                        "Distributed Security Systems Lab focuses on scalable "
+                        "and secure AI infrastructure."
+                    ),
                     "metadata": {
                         "university": "Falkenberg University of Cybernetics (FUC)",
                         "section_heading": "Distributed Security Systems Lab (DSSL)",
@@ -149,7 +183,8 @@ async def test_generate_response_uses_primary_and_updates_memory(monkeypatch):
     assert captured_metrics[-1]["timings_ms"]["llm_response_ms"] is not None
     assert captured_metrics[-1]["timings_ms"]["short_term_memory_ms"] is not None
     assert captured_metrics[-1]["timings_ms"]["long_term_memory_ms"] is not None
-    assert captured_metrics[-1]["quality"] == {}
+    assert "groundedness" in captured_metrics[-1]["quality"]
+    assert "citation_accuracy" in captured_metrics[-1]["quality"]
 
 
 @pytest.mark.asyncio
@@ -178,6 +213,298 @@ async def test_generate_response_skips_retrieval_when_disabled(monkeypatch):
     result = await llm_service.generate_response("user-1", "find ai professor")
 
     assert result == "primary-response"
+
+
+@pytest.mark.asyncio
+async def test_generate_response_uses_web_fallback_when_vector_empty(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "test-key")
+    monkeypatch.setattr(llm_service.settings.serpapi, "enabled", True)
+    monkeypatch.setattr(llm_service.settings.serpapi, "fallback_enabled", True)
+    monkeypatch.setattr(llm_service.settings.serpapi, "max_context_results", 2)
+
+    fake_redis = FakeRedis()
+    _attach_fake_redis(monkeypatch, fake_redis)
+
+    async def fake_build_context(_user_id, user_prompt):
+        return [{"role": "user", "content": user_prompt}]
+
+    async def fake_primary(messages):
+        assert any(
+            isinstance(message, dict)
+            and "Live web fallback context" in str(message.get("content", ""))
+            for message in messages
+        )
+        return FakeResponse("primary-response")
+
+    async def fake_update_memory(*_args, **_kwargs):
+        return None
+
+    async def fake_retrieve_document_chunks(*_args, **_kwargs):
+        return {"retrieval_strategy": "ann", "results": []}
+
+    async def fake_web_fallback(*_args, **_kwargs):
+        return {
+            "results": [
+                {
+                    "content": "Oxford AI entry requirements from official site.",
+                    "metadata": {
+                        "university": "Oxford MSc AI",
+                        "url": "https://example.edu/oxford",
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr(llm_service, "build_context", fake_build_context)
+    monkeypatch.setattr(llm_service, "_call_primary", fake_primary)
+    monkeypatch.setattr(llm_service, "update_memory", fake_update_memory)
+    monkeypatch.setattr(llm_service, "aretrieve_document_chunks", fake_retrieve_document_chunks)
+    monkeypatch.setattr(llm_service, "aretrieve_web_chunks", fake_web_fallback)
+
+    result = await llm_service.generate_response("user-1", "latest oxford ai admission")
+    assert result == "primary-response"
+
+
+@pytest.mark.asyncio
+async def test_generate_response_skips_web_fallback_when_vector_confident(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "test-key")
+    monkeypatch.setattr(llm_service.settings.serpapi, "enabled", True)
+    monkeypatch.setattr(llm_service.settings.serpapi, "fallback_enabled", True)
+    monkeypatch.setattr(llm_service.settings.serpapi, "fallback_similarity_threshold", 0.35)
+
+    fake_redis = FakeRedis()
+    _attach_fake_redis(monkeypatch, fake_redis)
+
+    async def fake_build_context(_user_id, user_prompt):
+        return [{"role": "user", "content": user_prompt}]
+
+    async def fake_primary(messages):
+        assert any(
+            isinstance(message, dict)
+            and "Retrieved long-term knowledge" in str(message.get("content", ""))
+            for message in messages
+        )
+        assert not any(
+            isinstance(message, dict)
+            and "Live web fallback context" in str(message.get("content", ""))
+            for message in messages
+        )
+        return FakeResponse("primary-response")
+
+    async def fake_update_memory(*_args, **_kwargs):
+        return None
+
+    async def fake_retrieve_document_chunks(*_args, **_kwargs):
+        return {
+            "retrieval_strategy": "ann",
+            "results": [
+                {
+                    "content": "Reliable on-platform result.",
+                    "distance": 0.1,
+                    "metadata": {"university": "Oxford"},
+                }
+            ],
+        }
+
+    async def should_not_call_web(*_args, **_kwargs):
+        raise AssertionError("web fallback should not run for confident vector matches")
+
+    monkeypatch.setattr(llm_service, "build_context", fake_build_context)
+    monkeypatch.setattr(llm_service, "_call_primary", fake_primary)
+    monkeypatch.setattr(llm_service, "update_memory", fake_update_memory)
+    monkeypatch.setattr(llm_service, "aretrieve_document_chunks", fake_retrieve_document_chunks)
+    monkeypatch.setattr(llm_service, "aretrieve_web_chunks", should_not_call_web)
+
+    result = await llm_service.generate_response("user-1", "oxford ai admission")
+    assert result == "primary-response"
+
+
+@pytest.mark.asyncio
+async def test_generate_response_uses_web_fallback_when_vector_low_confidence(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "test-key")
+    monkeypatch.setattr(llm_service.settings.serpapi, "enabled", True)
+    monkeypatch.setattr(llm_service.settings.serpapi, "fallback_enabled", True)
+    monkeypatch.setattr(llm_service.settings.serpapi, "fallback_similarity_threshold", 0.35)
+
+    fake_redis = FakeRedis()
+    _attach_fake_redis(monkeypatch, fake_redis)
+
+    async def fake_build_context(_user_id, user_prompt):
+        return [{"role": "user", "content": user_prompt}]
+
+    async def fake_primary(messages):
+        assert any(
+            isinstance(message, dict)
+            and "Live web fallback context" in str(message.get("content", ""))
+            for message in messages
+        )
+        return FakeResponse("primary-response")
+
+    async def fake_update_memory(*_args, **_kwargs):
+        return None
+
+    async def fake_retrieve_document_chunks(*_args, **_kwargs):
+        return {
+            "retrieval_strategy": "ann",
+            "results": [
+                {
+                    "content": "Potentially irrelevant vector hit.",
+                    "distance": 0.9,
+                    "metadata": {"university": "Unknown"},
+                }
+            ],
+        }
+
+    async def fake_web_fallback(*_args, **_kwargs):
+        return {
+            "results": [
+                {
+                    "content": "Official Oxford admissions page details.",
+                    "metadata": {
+                        "university": "Oxford MSc AI",
+                        "url": "https://example.edu/oxford",
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr(llm_service, "build_context", fake_build_context)
+    monkeypatch.setattr(llm_service, "_call_primary", fake_primary)
+    monkeypatch.setattr(llm_service, "update_memory", fake_update_memory)
+    monkeypatch.setattr(llm_service, "aretrieve_document_chunks", fake_retrieve_document_chunks)
+    monkeypatch.setattr(llm_service, "aretrieve_web_chunks", fake_web_fallback)
+
+    result = await llm_service.generate_response("user-1", "oxford ai admission")
+    assert result == "primary-response"
+
+
+@pytest.mark.asyncio
+async def test_generate_response_reranks_combined_vector_and_web_results(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "test-key")
+    monkeypatch.setattr(llm_service.settings.serpapi, "enabled", True)
+    monkeypatch.setattr(llm_service.settings.serpapi, "fallback_enabled", True)
+    monkeypatch.setattr(llm_service.settings.serpapi, "fallback_similarity_threshold", 0.35)
+
+    fake_redis = FakeRedis()
+    _attach_fake_redis(monkeypatch, fake_redis)
+
+    async def fake_build_context(_user_id, user_prompt):
+        return [{"role": "user", "content": user_prompt}]
+
+    async def fake_primary(messages):
+        joined = "\n".join(
+            str(message.get("content", "")) for message in messages if isinstance(message, dict)
+        )
+        assert "Best grounded web evidence." in joined
+        assert "Lower priority vector text." not in joined
+        return FakeResponse("primary-response")
+
+    async def fake_update_memory(*_args, **_kwargs):
+        return None
+
+    async def fake_retrieve_document_chunks(*_args, **_kwargs):
+        return {
+            "retrieval_strategy": "ann",
+            "results": [
+                {
+                    "content": "Lower priority vector text.",
+                    "distance": 0.85,
+                    "metadata": {"university": "Vector Source"},
+                }
+            ],
+        }
+
+    async def fake_web_fallback(*_args, **_kwargs):
+        return {
+            "results": [
+                {
+                    "content": "Best grounded web evidence.",
+                    "metadata": {"university": "Web Source 1", "url": "https://x.de/a"},
+                },
+                {
+                    "content": "Second web evidence.",
+                    "metadata": {"university": "Web Source 2", "url": "https://y.eu/b"},
+                },
+            ]
+        }
+
+    async def fake_rerank(_query, candidates):
+        assert len(candidates) == 3
+        return {
+            "results": [candidates[1], candidates[2]],
+            "applied": True,
+            "timings_ms": {"total": 7},
+        }
+
+    monkeypatch.setattr(llm_service, "build_context", fake_build_context)
+    monkeypatch.setattr(llm_service, "_call_primary", fake_primary)
+    monkeypatch.setattr(llm_service, "update_memory", fake_update_memory)
+    monkeypatch.setattr(llm_service, "aretrieve_document_chunks", fake_retrieve_document_chunks)
+    monkeypatch.setattr(llm_service, "aretrieve_web_chunks", fake_web_fallback)
+    monkeypatch.setattr(llm_service, "arerank_retrieval_results", fake_rerank)
+
+    result = await llm_service.generate_response("user-1", "best ai program evidence")
+    assert result == "primary-response"
+
+
+@pytest.mark.asyncio
+async def test_generate_response_returns_sorry_when_web_fallback_has_no_results(monkeypatch):
+    monkeypatch.setenv("SERPAPI_API_KEY", "test-key")
+    monkeypatch.setattr(llm_service.settings.serpapi, "enabled", True)
+    monkeypatch.setattr(llm_service.settings.serpapi, "fallback_enabled", True)
+
+    fake_redis = FakeRedis()
+    _attach_fake_redis(monkeypatch, fake_redis)
+
+    async def fake_build_context(_user_id, user_prompt):
+        return [{"role": "user", "content": user_prompt}]
+
+    async def should_not_call_model(_messages):
+        raise AssertionError("model should not run when retrieval+web fallback found nothing")
+
+    async def fake_update_memory(*_args, **_kwargs):
+        return None
+
+    async def fake_retrieve_document_chunks(*_args, **_kwargs):
+        return {"retrieval_strategy": "ann", "results": []}
+
+    async def fake_web_fallback(*_args, **_kwargs):
+        return {"results": []}
+
+    monkeypatch.setattr(llm_service, "build_context", fake_build_context)
+    monkeypatch.setattr(llm_service, "_call_primary", should_not_call_model)
+    monkeypatch.setattr(llm_service, "update_memory", fake_update_memory)
+    monkeypatch.setattr(llm_service, "aretrieve_document_chunks", fake_retrieve_document_chunks)
+    monkeypatch.setattr(llm_service, "aretrieve_web_chunks", fake_web_fallback)
+
+    result = await llm_service.generate_response("user-1", "latest oxford ai admission")
+    assert result == "Sorry, no relevant information is found."
+
+
+@pytest.mark.asyncio
+async def test_generate_response_returns_sorry_when_strict_citation_has_no_evidence(monkeypatch):
+    monkeypatch.setattr(llm_service, "_is_citation_grounding_required", lambda: True)
+    monkeypatch.setattr(llm_service.settings.serpapi, "enabled", False)
+    monkeypatch.setattr(llm_service.settings.serpapi, "fallback_enabled", False)
+
+    fake_redis = FakeRedis()
+    _attach_fake_redis(monkeypatch, fake_redis)
+
+    async def fake_build_context(_user_id, user_prompt):
+        return [{"role": "user", "content": user_prompt}]
+
+    async def fake_retrieve_document_chunks(*_args, **_kwargs):
+        return {"retrieval_strategy": "ann", "results": []}
+
+    async def should_not_call_model(_messages):
+        raise AssertionError("model should not run without evidence in strict citation mode")
+
+    monkeypatch.setattr(llm_service, "build_context", fake_build_context)
+    monkeypatch.setattr(llm_service, "aretrieve_document_chunks", fake_retrieve_document_chunks)
+    monkeypatch.setattr(llm_service, "_call_primary", should_not_call_model)
+
+    result = await llm_service.generate_response("user-1", "oxford ai admission")
+    assert result == "Sorry, no relevant information is found."
 
 
 @pytest.mark.asyncio
@@ -266,7 +593,9 @@ async def test_generate_response_injects_chat_system_prompt(monkeypatch):
         assert messages[0]["role"] == "system"
         assert "UniGraph" in messages[0]["content"]
         assert messages[1]["role"] == "system"
-        assert "Retrieved long-term knowledge" in messages[1]["content"]
+        assert "Citation policy" in messages[1]["content"]
+        assert messages[2]["role"] == "system"
+        assert "Retrieved long-term knowledge" in messages[2]["content"]
         return {"blocked": False, "messages": messages, "reason": ""}
 
     async def fake_primary(_messages):
@@ -279,7 +608,10 @@ async def test_generate_response_injects_chat_system_prompt(monkeypatch):
         return {
             "results": [
                 {
-                    "content": "Master of Science in Artificial Intelligence Systems is offered in Germany.",
+                    "content": (
+                        "Master of Science in Artificial Intelligence Systems "
+                        "is offered in Germany."
+                    ),
                     "metadata": {
                         "university": "Rheinberg Technical University (RTU)",
                         "section_heading": "Master of Science in Artificial Intelligence Systems",
@@ -597,3 +929,36 @@ def test_format_retrieval_context_dedupes_and_limits_results():
     assert "1. A | Programs: Alpha program details" in content
     assert "2. B | Research: Beta research details" in content
     assert "A2 | Programs 2" not in content
+
+
+def test_enforce_citation_grounding_accepts_allowed_host():
+    state = {
+        "citation_required": True,
+        "evidence_urls": ["https://www.ox.ac.uk/admissions"],
+        "output_guard_reason": "",
+    }
+    answer = "Check https://www.ox.ac.uk/admissions for official requirements."
+    assert _REAL_ENFORCE_CITATION_GROUNDING(answer, state) == answer
+
+
+def test_enforce_citation_grounding_returns_abstain_without_citation():
+    state = {
+        "citation_required": True,
+        "evidence_urls": ["https://www.ox.ac.uk/admissions"],
+        "output_guard_reason": "",
+    }
+    result = _REAL_ENFORCE_CITATION_GROUNDING("Requirements are competitive.", state)
+    assert result == "Sorry, no relevant information is found."
+    assert state["output_guard_reason"] == "missing_citations"
+
+
+def test_enforce_citation_grounding_requires_evidence_when_policy_enabled(monkeypatch):
+    monkeypatch.setattr(llm_service, "_is_citation_grounding_required", lambda: True)
+    state = {
+        "citation_required": False,
+        "evidence_urls": [],
+        "output_guard_reason": "",
+    }
+    result = _REAL_ENFORCE_CITATION_GROUNDING("Some answer text.", state)
+    assert result == "Sorry, no relevant information is found."
+    assert state["output_guard_reason"] == "weak_evidence_missing"

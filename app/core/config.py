@@ -146,6 +146,55 @@ def _apply_env_overrides(data: dict) -> dict:
     _set(["security", "jwt_audience"], "SECURITY_JWT_AUDIENCE")
     _set(["security", "jwt_exp_minutes"], "SECURITY_JWT_EXP_MINUTES", int)
 
+    _set(["serpapi", "enabled"], "SERPAPI_ENABLED", bool)
+    _set(["serpapi", "google_search_url"], "SERPAPI_GOOGLE_SEARCH_URL")
+    _set(["serpapi", "engine"], "SERPAPI_ENGINE")
+    _set(["serpapi", "api_key_env_name"], "SERPAPI_API_KEY_ENV_NAME")
+    _set(["serpapi", "default_gl"], "SERPAPI_DEFAULT_GL")
+    _set(["serpapi", "default_hl"], "SERPAPI_DEFAULT_HL")
+    _set(["serpapi", "default_num"], "SERPAPI_DEFAULT_NUM", int)
+    _set(["serpapi", "timeout_seconds"], "SERPAPI_TIMEOUT_SECONDS", float)
+    _set(["serpapi", "max_concurrency"], "SERPAPI_MAX_CONCURRENCY", int)
+    _set(["serpapi", "queue_workers"], "SERPAPI_QUEUE_WORKERS", int)
+    _set(["serpapi", "queue_max_size"], "SERPAPI_QUEUE_MAX_SIZE", int)
+    _set(["serpapi", "fallback_enabled"], "SERPAPI_FALLBACK_ENABLED", bool)
+    _set(
+        ["serpapi", "fallback_similarity_threshold"],
+        "SERPAPI_FALLBACK_SIMILARITY_THRESHOLD",
+        float,
+    )
+    _set(["serpapi", "multi_query_enabled"], "SERPAPI_MULTI_QUERY_ENABLED", bool)
+    _set(["serpapi", "max_query_variants"], "SERPAPI_MAX_QUERY_VARIANTS", int)
+    _set(
+        ["serpapi", "allowed_domain_suffixes"],
+        "SERPAPI_ALLOWED_DOMAIN_SUFFIXES",
+        lambda raw: [entry.strip() for entry in raw.split(",") if entry.strip()],
+    )
+    _set(["serpapi", "max_context_results"], "SERPAPI_MAX_CONTEXT_RESULTS", int)
+    _set(["serpapi", "fetch_page_content"], "SERPAPI_FETCH_PAGE_CONTENT", bool)
+    _set(["serpapi", "max_pages_to_fetch"], "SERPAPI_MAX_PAGES_TO_FETCH", int)
+    _set(
+        ["serpapi", "page_fetch_timeout_seconds"],
+        "SERPAPI_PAGE_FETCH_TIMEOUT_SECONDS",
+        float,
+    )
+    _set(["serpapi", "max_page_chars"], "SERPAPI_MAX_PAGE_CHARS", int)
+    _set(["serpapi", "strip_boilerplate"], "SERPAPI_STRIP_BOILERPLATE", bool)
+    _set(["serpapi", "min_clean_line_chars"], "SERPAPI_MIN_CLEAN_LINE_CHARS", int)
+    _set(["serpapi", "page_chunk_chars"], "SERPAPI_PAGE_CHUNK_CHARS", int)
+    _set(
+        ["serpapi", "page_chunk_overlap_chars"],
+        "SERPAPI_PAGE_CHUNK_OVERLAP_CHARS",
+        int,
+    )
+    _set(["serpapi", "max_chunks_per_page"], "SERPAPI_MAX_CHUNKS_PER_PAGE", int)
+    _set(["serpapi", "min_chunk_chars"], "SERPAPI_MIN_CHUNK_CHARS", int)
+    _set(
+        ["serpapi", "chunk_dedupe_similarity"],
+        "SERPAPI_CHUNK_DEDUPE_SIMILARITY",
+        float,
+    )
+
     # Backward-compatible aliases: old AZURE_OPENAI_* vars still map into bedrock config.
     _set(["bedrock", "primary_model_id"], "AZURE_OPENAI_PRIMARY_DEPLOYMENT")
     _set(["bedrock", "fallback_model_id"], "AZURE_OPENAI_FALLBACK_DEPLOYMENT")
@@ -155,6 +204,17 @@ def _apply_env_overrides(data: dict) -> dict:
     _set(["bedrock", "fallback_model_id"], "BEDROCK_FALLBACK_MODEL_ID")
     _set(["bedrock", "timeout"], "BEDROCK_TIMEOUT", int)
     _set(["bedrock", "max_concurrency"], "BEDROCK_MAX_CONCURRENCY", int)
+    _set(["bedrock", "reranker_enabled"], "BEDROCK_RERANKER_ENABLED", bool)
+    _set(["bedrock", "reranker_model_id"], "BEDROCK_RERANKER_MODEL_ID")
+    _set(["bedrock", "reranker_top_n"], "BEDROCK_RERANKER_TOP_N", int)
+    _set(["bedrock", "reranker_min_documents"], "BEDROCK_RERANKER_MIN_DOCUMENTS", int)
+    _set(["bedrock", "reranker_max_documents"], "BEDROCK_RERANKER_MAX_DOCUMENTS", int)
+    _set(["bedrock", "reranker_max_query_chars"], "BEDROCK_RERANKER_MAX_QUERY_CHARS", int)
+    _set(
+        ["bedrock", "reranker_max_document_chars"],
+        "BEDROCK_RERANKER_MAX_DOCUMENT_CHARS",
+        int,
+    )
 
     _set(["redis", "app", "host"], "REDIS_APP_HOST")
     _set(["redis", "app", "port"], "REDIS_APP_PORT", int)
@@ -291,6 +351,7 @@ def _apply_env_overrides(data: dict) -> dict:
     _set(["io", "llm_max_concurrency"], "IO_LLM_MAX_CONCURRENCY", int)
     _set(["io", "embedding_max_concurrency"], "IO_EMBEDDING_MAX_CONCURRENCY", int)
     _set(["io", "retrieval_max_concurrency"], "IO_RETRIEVAL_MAX_CONCURRENCY", int)
+    _set(["io", "reranker_max_concurrency"], "IO_RERANKER_MAX_CONCURRENCY", int)
     _set(["io", "redis_max_concurrency"], "IO_REDIS_MAX_CONCURRENCY", int)
     _set(["io", "bedrock_executor_workers"], "IO_BEDROCK_EXECUTOR_WORKERS", int)
 

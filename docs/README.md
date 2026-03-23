@@ -20,6 +20,7 @@ Files in this folder:
 - `fastapi-architecture.md`: FastAPI component diagram (middleware, routers, services, workers, and data stores).
 - `load-testing-aws.md`: YAML-driven AWS full-stack load testing (SQS, Postgres, DynamoDB, Redis, workers, result interpretation).
 - `system-overview.md`: concise end-to-end architecture, Bedrock-based generation/retrieval flow, security/scalability, and latest performance snapshot.
+- `website-search.md`: SerpAPI-based website fallback architecture, citation-grounded answering, and web-fallback quality tracking.
 - `strategy.md`: current architecture state and the recommended next build steps.
 
 Recommended reading order:
@@ -39,4 +40,5 @@ Recommended reading order:
 13. `fastapi-architecture.md`
 14. `load-testing-aws.md`
 15. `system-overview.md`
-16. `strategy.md`
+16. `website-search.md`
+17. `strategy.md`

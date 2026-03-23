@@ -30,7 +30,10 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
         client_ip = request.client.host if request.client else "unknown"
 
         logger.info(
-            "RequestLog | request_id=%s method=%s path=%s status=%s latency_ms=%.2f user_id=%s client_ip=%s",
+            (
+                "RequestLog | request_id=%s method=%s path=%s status=%s "
+                "latency_ms=%.2f user_id=%s client_ip=%s"
+            ),
             request_id,
             request.method,
             request.url.path,

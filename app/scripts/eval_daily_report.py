@@ -10,6 +10,11 @@ from app.core.paths import resolve_project_path
 
 settings = get_settings()
 _deserializer = TypeDeserializer()
+_SCAN_PROJECTION = (
+    "request_id,#ts,user_id,session_id,clarity_score,relevance_score,"
+    "evidence_similarity_score,hallucination_score,answered_question,"
+    "failure_reason,overall_score,question,answer"
+)
 
 
 def _region_name() -> str | None:
@@ -50,7 +55,7 @@ def _load_eval_rows(hours: int) -> list[dict]:
     while True:
         kwargs = {
             "TableName": table,
-            "ProjectionExpression": "request_id,#ts,user_id,session_id,clarity_score,relevance_score,evidence_similarity_score,hallucination_score,answered_question,failure_reason,overall_score,question,answer",
+            "ProjectionExpression": _SCAN_PROJECTION,
             "ExpressionAttributeNames": {"#ts": "timestamp"},
             "Limit": 200,
         }

@@ -216,9 +216,7 @@ def test_ingest_university_metadata_payload_processes_all_entities(monkeypatch):
             ],
             "program_courses": [{"program_key": "prog:ai-ms", "course_key": "course:ml"}],
             "program_labs": [{"program_key": "prog:ai-ms", "lab_key": "lab:ai"}],
-            "program_professors": [
-                {"program_key": "prog:ai-ms", "professor_key": "prof:max"}
-            ],
+            "program_professors": [{"program_key": "prog:ai-ms", "professor_key": "prof:max"}],
             "professor_labs": [{"professor_key": "prof:max", "lab_key": "lab:ai"}],
             "source_records": [
                 {

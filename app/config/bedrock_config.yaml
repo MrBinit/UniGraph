@@ -1,6 +1,14 @@
 # Bedrock generation configuration.
 bedrock:
-  primary_model_id: "us.anthropic.claude-3-5-sonnet-20240620-v1:0"
-  fallback_model_id: "us.anthropic.claude-3-haiku-20240307-v1:0"
+  primary_model_id: "arn:aws:bedrock:us-east-1:173763384281:inference-profile/us.anthropic.claude-sonnet-4-6"
+  fallback_model_id: "arn:aws:bedrock:us-east-1:173763384281:inference-profile/us.anthropic.claude-3-sonnet-20240229-v1:0"
   timeout: 30
   max_concurrency: 50
+  reranker_enabled: true
+  reranker_model_id: "cohere.rerank-v3-5:0"
+  reranker_top_n: 2
+  reranker_min_documents: 2
+  reranker_max_documents: 12
+  reranker_max_query_chars: 700
+  reranker_max_document_chars: 1400
+

@@ -5,15 +5,15 @@ import socket
 import time
 
 os.environ.setdefault("REDIS_RUNTIME_ROLE", "worker")
-from app.core.config import get_settings
-from app.core.security import validate_security_configuration
-from app.services.summary_queue_service import (
+from app.core.config import get_settings  # noqa: E402
+from app.core.security import validate_security_configuration  # noqa: E402
+from app.services.summary_queue_service import (  # noqa: E402
     claim_stale_summary_jobs,
     ensure_consumer_group,
     monitor_summary_dlq,
     read_summary_jobs,
 )
-from app.services.summary_worker_service import process_summary_job
+from app.services.summary_worker_service import process_summary_job  # noqa: E402
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

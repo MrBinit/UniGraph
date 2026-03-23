@@ -29,7 +29,10 @@ def _build_retrieval_response(
 ) -> dict:
     total_ms = _elapsed_ms(started_at)
     logger.info(
-        "RetrievalLatency | strategy=%s | top_k=%s | results=%s | embedding_ms=%s | db_ms=%s | total_ms=%s | filters=%s",
+        (
+            "RetrievalLatency | strategy=%s | top_k=%s | results=%s "
+            "| embedding_ms=%s | db_ms=%s | total_ms=%s | filters=%s"
+        ),
         retrieval_strategy,
         top_k,
         len(results),

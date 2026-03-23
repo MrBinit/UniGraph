@@ -128,6 +128,9 @@ def _persist_request_record(record: dict) -> None:
     llm_usage = record.get("llm_usage", {})
     if not isinstance(llm_usage, dict):
         llm_usage = {}
+    quality = record.get("quality", {})
+    if not isinstance(quality, dict):
+        quality = {}
     evidence = _compact_evidence(retrieval.get("evidence", []))
     query, query_char_count, query_truncated = _truncate_text(
         record.get("question", ""), _MAX_QUERY_CHARS
@@ -152,6 +155,7 @@ def _persist_request_record(record: dict) -> None:
         "outcome": {"S": str(record.get("outcome", "unknown"))},
         "retrieval_strategy": {"S": str(retrieval.get("strategy", ""))},
         "retrieval_result_count": {"N": _int_str(retrieval.get("result_count"))},
+        "retrieval_source_count": {"N": _int_str(retrieval.get("source_count"))},
         "retrieval_evidence_count": {"N": _int_str(len(evidence))},
         "retrieval_evidence_json": {"S": json.dumps(evidence, ensure_ascii=False, default=str)},
         "query": {"S": query},
@@ -164,6 +168,8 @@ def _persist_request_record(record: dict) -> None:
         "latency_llm_ms": {"N": _int_str(timings.get("llm_response_ms"))},
         "latency_short_term_ms": {"N": _int_str(timings.get("short_term_memory_ms"))},
         "latency_long_term_ms": {"N": _int_str(timings.get("long_term_memory_ms"))},
+        "groundedness": {"N": _float_str(quality.get("groundedness"))},
+        "citation_accuracy": {"N": _float_str(quality.get("citation_accuracy"))},
         "prompt_tokens": {"N": _int_str(llm_usage.get("prompt_tokens"))},
         "total_tokens": {"N": _int_str(llm_usage.get("total_tokens"))},
         eval_status_attr: {"S": eval_status},

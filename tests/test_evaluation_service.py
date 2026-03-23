@@ -84,3 +84,42 @@ def test_label_chat_trace_and_report():
     assert report["retrieval_metrics"]["hit_at_k"] == 1.0
     assert report["generation_metrics"]["query_relevance"] > 0.0
     assert report["conversations"][0]["metrics"]["generation"]["hallucination_proxy"] < 1.0
+
+
+def test_report_includes_web_fallback_quality_and_feedback():
+    redis = FakeRedis()
+    conversation_id = evaluation_service.store_chat_trace(
+        user_id="user-3",
+        prompt="latest admissions",
+        answer="Use https://www.lmu.de/programs/ai.",
+        retrieved_results=[
+            {
+                "chunk_id": "web:1",
+                "source_path": "https://www.lmu.de/programs/ai",
+                "metadata": {"url": "https://www.lmu.de/programs/ai"},
+                "content": "LMU AI admissions details",
+            }
+        ],
+        retrieval_strategy="web_fallback_reranked",
+        timings_ms={"retrieval": 5},
+        quality={"citation_accuracy": 1.0},
+        evidence_urls=["https://www.lmu.de/programs/ai"],
+        redis=redis,
+    )
+
+    labeled = evaluation_service.label_chat_trace(
+        user_id="user-3",
+        conversation_id=conversation_id,
+        user_feedback="Helpful answer",
+        user_feedback_score=1,
+        redis=redis,
+    )
+    assert labeled is not None
+
+    report = evaluation_service.get_user_evaluation_report("user-3", limit=10, redis=redis)
+    web_metrics = report["web_fallback_metrics"]
+    assert web_metrics["total_web_fallback_answers"] == 1
+    assert web_metrics["avg_source_count"] == 1.0
+    assert web_metrics["avg_citation_accuracy"] == 1.0
+    assert web_metrics["feedback_count"] == 1
+    assert web_metrics["positive_feedback_rate"] == 1.0

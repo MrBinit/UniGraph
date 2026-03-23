@@ -1,0 +1,12 @@
+[run]
+# Keep file paths relative so Sonar can map coverage regardless of host/container paths.
+relative_files = True
+source =
+    app
+
+[report]
+omit =
+    tests/*
+    venv/*
+    .venv/*
+    .scannerwork/*

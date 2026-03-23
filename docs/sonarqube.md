@@ -4,7 +4,9 @@
 Use SonarQube for static analysis, code-smell/security checks, duplication detection, and quality-gate enforcement.
 
 ## 2) Local Setup
-1. Start SonarQube server and database (for local learning, Docker Compose is fine).
+1. Start SonarQube server and database:
+   - `./scripts/sonarqube-up.sh`
+   - (or) `docker compose -f docker-compose.sonarqube.yml up -d`
 2. Create a user token in SonarQube UI.
 3. Export token locally:
    - `export SONAR_TOKEN="<your-token>"`
@@ -13,7 +15,7 @@ This repo is already configured via `sonar-project.properties`.
 
 ## 3) Local Scan (Project Root)
 ```bash
-./venv/bin/pytest --cov=. --cov-report=xml:coverage.xml -q
+./venv/bin/pytest --cov --cov-report=xml:coverage.xml -q
 sonar-scanner "-Dsonar.host.url=http://localhost:9000" "-Dsonar.token=$SONAR_TOKEN"
 ```
 
@@ -29,12 +31,20 @@ CI workflow `.github/workflows/ci.yml` includes job `sonar-quality-gate` that:
 3. runs Sonar scanner in Docker (`sonarsource/sonar-scanner-cli`).
 
 Required repository settings:
-- secret: `SONAR_TOKEN`
+- secret: `AWS_GITHUB_ACTIONS_ROLE_ARN`
 - variable: `SONAR_HOST_URL`
+- variable: `SONAR_AWS_SECRET_ID` (AWS Secrets Manager secret id containing Sonar token JSON)
+- variable: `SONAR_TOKEN_JSON_KEY` (optional; defaults to `SONAR_TOKEN`)
 
-If either value is missing, the workflow skips the Sonar step and prints a clear message.
+The workflow uses OIDC to assume AWS role and fetches the Sonar token from AWS Secrets Manager at runtime.
+No Sonar token is stored in repository code.
 
-## 5) Troubleshooting
+## 5) Stop Local SonarQube
+```bash
+./scripts/sonarqube-down.sh
+```
+
+## 6) Troubleshooting
 - `command not found: sonar-scanner`
   - install scanner locally (`brew install sonar-scanner` on macOS) or use CI job.
 - `Communicating with SonarQube Cloud` + `403`

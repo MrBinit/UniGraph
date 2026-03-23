@@ -75,7 +75,10 @@ def _vector_index_sql(*, if_not_exists: bool) -> str:
             CREATE INDEX {guard}{index_name}
             ON {table_name}
             USING hnsw (embedding vector_cosine_ops)
-            WITH (m = {settings.postgres.hnsw_m}, ef_construction = {settings.postgres.hnsw_ef_construction});
+            WITH (
+                m = {settings.postgres.hnsw_m},
+                ef_construction = {settings.postgres.hnsw_ef_construction}
+            );
         """
 
     raise ValueError(
@@ -181,7 +184,7 @@ async def _asearch_document_chunks_ann(*, vector_value: str, top_k: int) -> list
     """
 
     params = (vector_value, vector_value, top_k)
-    pool = get_async_postgres_pool()
+    pool = await get_async_postgres_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(sql, params)
@@ -229,7 +232,7 @@ async def _asearch_document_chunks_filtered_exact(
     """
 
     params = (json.dumps(metadata_filters), vector_value, vector_value, top_k)
-    pool = get_async_postgres_pool()
+    pool = await get_async_postgres_pool()
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(sql, params)
@@ -364,7 +367,7 @@ def search_document_chunks(
     limit: int = 5,
     metadata_filters: dict[str, str] | None = None,
 ) -> list[dict]:
-    """Search embedded document chunks with ANN for unfiltered search and exact reranking for filtered search."""
+    """Search embedded chunks with ANN unfiltered, and exact reranking when filtered."""
     if not embedding:
         raise ValueError("A query embedding is required for document chunk search.")
 

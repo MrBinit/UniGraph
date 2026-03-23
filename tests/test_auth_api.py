@@ -2,11 +2,10 @@ import json
 
 from fastapi.testclient import TestClient
 
-from app.core.security import decode_access_token
 from app.main import app
 
 
-def test_password_login_default_credentials(monkeypatch):
+def test_password_login_rejects_when_no_users_configured(monkeypatch):
     monkeypatch.delenv("SECURITY_LOGIN_USERS_JSON", raising=False)
     client = TestClient(app)
 
@@ -15,12 +14,8 @@ def test_password_login_default_credentials(monkeypatch):
         json={"username": "admin", "password": "admin"},
     )
 
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["token_type"] == "bearer"
-    assert payload["user_id"] == "admin"
-    claims = decode_access_token(payload["access_token"])
-    assert claims["sub"] == "admin"
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid username or password."
 
 
 def test_password_login_rejects_invalid_credentials():

@@ -12,14 +12,7 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 _LOGIN_USERS_ENV = "SECURITY_LOGIN_USERS_JSON"
-_DEFAULT_LOGIN_USERS = [
-    {
-        "username": "admin",
-        "password": "admin",
-        "user_id": "admin",
-        "roles": ["user"],
-    }
-]
+_DEFAULT_LOGIN_USERS: list[dict] = []
 _INVALID_CREDENTIALS_DETAIL = "Invalid username or password."
 
 
@@ -62,14 +55,14 @@ def _login_users() -> list[dict]:
     try:
         parsed = json.loads(raw)
     except json.JSONDecodeError:
-        logger.warning("Invalid JSON in %s; using default login user.", _LOGIN_USERS_ENV)
+        logger.warning("Invalid JSON in %s; no login users loaded.", _LOGIN_USERS_ENV)
         return list(_DEFAULT_LOGIN_USERS)
 
     users = _normalize_login_users(parsed)
     if users:
         return users
 
-    logger.warning("%s did not contain valid users; using default login user.", _LOGIN_USERS_ENV)
+    logger.warning("%s did not contain valid users; no login users loaded.", _LOGIN_USERS_ENV)
     return list(_DEFAULT_LOGIN_USERS)
 
 

@@ -2,5 +2,6 @@ io:
   llm_max_concurrency: 50
   embedding_max_concurrency: 8
   retrieval_max_concurrency: 32
+  reranker_max_concurrency: 8
   redis_max_concurrency: 200
   bedrock_executor_workers: 64

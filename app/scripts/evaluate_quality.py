@@ -7,13 +7,13 @@ import sys
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-from app.services.llm_service import generate_response
-from app.services.quality_metrics_service import (
+from app.services.llm_service import generate_response  # noqa: E402
+from app.services.quality_metrics_service import (  # noqa: E402
     aggregate_metric_rows,
     generation_metrics,
     retrieval_metrics,
 )
-from app.services.retrieval_service import retrieve_document_chunks
+from app.services.retrieval_service import retrieve_document_chunks  # noqa: E402
 
 
 def _load_eval_cases(dataset_path: Path) -> list[dict]:

@@ -15,7 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from app.services.llm_service import generate_response_stream
+from app.services.llm_service import generate_response_stream  # noqa: E402
 
 SESSION_USER_ID_PREFIX = "gradio-session"
 STREAM_CHUNK_SIZE = int(os.getenv("GRADIO_STREAM_CHUNK_SIZE", "120"))

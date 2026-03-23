@@ -309,7 +309,10 @@ async def build_context(user_id: str, new_user_message: str) -> list:
     )
 
     logger.info(
-        "MemoryCheck | user=%s | token_count=%s | message_count=%s | summary_exists=%s | soft_limit=%s | hard_limit=%s",
+        (
+            "MemoryCheck | user=%s | token_count=%s | message_count=%s "
+            "| summary_exists=%s | soft_limit=%s | hard_limit=%s"
+        ),
         user_id,
         token_count_pre_compaction,
         len(messages),

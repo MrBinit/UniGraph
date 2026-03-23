@@ -23,13 +23,14 @@ All application routes are mounted under:
 ### `POST /api/v1/auth/login`
 
 Password login endpoint that returns a bearer token.
+Users must be configured through `SECURITY_LOGIN_USERS_JSON`.
 
 Request body:
 
 ```json
 {
-  "username": "admin",
-  "password": "admin"
+  "username": "alice",
+  "password": "alice-pass"
 }
 ```
 
@@ -39,8 +40,8 @@ Response body (example):
 {
   "access_token": "<jwt>",
   "token_type": "bearer",
-  "user_id": "admin",
-  "roles": ["user"],
+  "user_id": "alice@example.com",
+  "roles": ["user", "admin"],
   "expires_in_seconds": 3600
 }
 ```
