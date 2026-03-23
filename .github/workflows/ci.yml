@@ -28,5 +28,8 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Run tests
+        env:
+          SECURITY_JWT_SECRET: "ci-jwt-secret-at-least-32-characters-long"
+          MEMORY_ENCRYPTION_KEY: "ci-memory-key-at-least-32-characters-long"
         run: |
           pytest -q
