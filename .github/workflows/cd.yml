@@ -93,8 +93,8 @@ jobs:
     timeout-minutes: 25
     environment: production
     env:
-      FRONTEND_S3_BUCKET: ${{ vars.FRONTEND_S3_BUCKET || env.FRONTEND_S3_BUCKET }}
-      FRONTEND_CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.FRONTEND_CLOUDFRONT_DISTRIBUTION_ID || env.FRONTEND_CLOUDFRONT_DISTRIBUTION_ID }}
+      FRONTEND_S3_BUCKET: ${{ vars.FRONTEND_S3_BUCKET != '' && vars.FRONTEND_S3_BUCKET || 'unigraph-frontend' }}
+      FRONTEND_CLOUDFRONT_DISTRIBUTION_ID: ${{ vars.FRONTEND_CLOUDFRONT_DISTRIBUTION_ID != '' && vars.FRONTEND_CLOUDFRONT_DISTRIBUTION_ID || 'EILC5TTHBL1C3' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
