@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { BrandIcon, BrandLogo } from "./components/Brand";
 import { ChatInput } from "./components/ChatInput";
-import { CheckCircleIcon, CloseIcon, GlobeIcon, LinkIcon, MenuIcon } from "./components/Icons";
+import { MenuIcon } from "./components/Icons";
 import { LoginPanel } from "./components/LoginPanel";
 import { MessageCard } from "./components/MessageCard";
 import { Sidebar } from "./components/Sidebar";
@@ -200,9 +200,26 @@ function displayWebsite(value: string): string {
   }
 }
 
+function normalizeUrlCandidate(raw: string): string | null {
+  const trimmed = String(raw ?? "").trim().replace(/[),.;\]]+$/g, "");
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    const normalizedPath = parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "");
+    return `${parsed.protocol}//${parsed.host}${normalizedPath}${parsed.search}`;
+  } catch {
+    return null;
+  }
+}
+
 function extractUrlsFromText(input: string): string[] {
   const matches = input.match(/https?:\/\/[^\s)"']+/gi) ?? [];
-  return Array.from(new Set(matches.map((item) => item.trim())));
+  const urls = matches
+    .map((item) => normalizeUrlCandidate(item))
+    .filter((item): item is string => Boolean(item));
+  return Array.from(new Set(urls));
 }
 
 const TRACE_EVENT_LABELS: Record<string, string> = {
@@ -247,41 +264,23 @@ const TRACE_EVENT_LABELS: Record<string, string> = {
   job_failed: "Job failed",
 };
 
-const ESSENTIAL_TRACE_TYPES = new Set<string>([
-  "request_received",
-  "query_plan_created",
-  "search_started",
-  "search_results",
-  "retrieval_verification",
-  "retrieval_reranked",
-  "retrieval_selective_filter",
-  "evidence_selected",
-  "evidence_trust_scored",
-  "citation_grounding_ready",
-  "answer_planning_completed",
-  "fast_refine_started",
-  "fast_refine_completed",
-  "answer_verification_completed",
-  "answer_uncertainty_flagged",
-  "answer_finalized",
-  "job_completed",
-  "job_failed",
-]);
-
-const DECISION_TRACE_TYPES = new Set<string>([
+const THOUGHT_TRACE_TYPES = new Set<string>([
   "query_intent_classified",
   "retrieval_query_decomposed",
+  "query_planner_started",
   "query_plan_created",
-  "web_fallback_started",
-  "web_retrieval_skipped",
-  "retrieval_reranked",
-  "retrieval_selective_filter",
-  "evidence_selected",
-  "evidence_trust_scored",
-  "fast_refine_started",
-  "fast_refine_completed",
+  "query_planner_completed",
+  "query_planner_skipped",
+  "search_started",
+  "search_results",
+  "pages_read",
+  "facts_extracted",
+  "gaps_identified",
+  "retrieval_verification",
+  "source_ranking_completed",
+  "answer_planning_started",
+  "answer_planning_completed",
   "answer_verification_completed",
-  "answer_uncertainty_flagged",
   "answer_finalized",
 ]);
 
@@ -325,178 +324,108 @@ function extractTraceTrustSignals(payload?: Record<string, unknown>) {
   };
 }
 
-function isEssentialTraceEvent(event: TraceEventItem): boolean {
-  return ESSENTIAL_TRACE_TYPES.has(String(event.type).trim().toLowerCase());
-}
-
 function traceLabel(type: string): string {
   const normalized = type.trim().toLowerCase();
   return TRACE_EVENT_LABELS[normalized] ?? normalized.replace(/_/g, " ");
 }
 
-function traceTimeLabel(timestamp?: string): string {
-  if (!timestamp) {
+function isThoughtTraceEvent(type: string): boolean {
+  return THOUGHT_TRACE_TYPES.has(String(type).trim().toLowerCase());
+}
+
+function normalizeTraceTextList(value: unknown, limit = 3): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => String(item ?? "").trim())
+    .filter((item) => Boolean(item))
+    .slice(0, limit);
+}
+
+function compactThoughtFragment(text: string, maxChars = 72): string {
+  const normalized = String(text).replace(/\s+/g, " ").trim();
+  if (!normalized) {
     return "";
   }
-  const parsed = new Date(timestamp);
-  if (!Number.isFinite(parsed.getTime())) {
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxChars - 1))}…`;
+}
+
+function compactThoughtLine(prefix: string, values: string[]): string {
+  if (!values.length) {
     return "";
   }
-  return parsed.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-}
-
-function compactUrlLabel(url: string): string {
-  return url.replace(/^https?:\/\//i, "").replace(/\/$/, "");
-}
-
-interface SourceCardItem {
-  url: string;
-  domain: string;
-  title: string;
-  publishedDate: string;
-  trustScore?: number;
-}
-
-function normalizeHttpUrl(value: unknown): string {
-  const text = String(value ?? "").trim();
-  if (!text) {
+  const compact = values
+    .map((item) => compactThoughtFragment(item))
+    .filter((item) => Boolean(item))
+    .join(" | ");
+  if (!compact) {
     return "";
   }
-  if (!/^https?:\/\//i.test(text)) {
-    return "";
-  }
-  return text;
+  return `${prefix}: ${compact}`.slice(0, 180);
 }
 
-function normalizeTrustScore(value: unknown): number | undefined {
-  const numeric = typeof value === "number" ? value : Number(value);
-  if (!Number.isFinite(numeric)) {
-    return undefined;
+function traceThoughtDetails(event: TraceEventItem): string[] {
+  const payload =
+    event.payload && typeof event.payload === "object"
+      ? (event.payload as Record<string, unknown>)
+      : null;
+  if (!payload) {
+    return [];
   }
-  if (numeric < 0) {
-    return 0;
-  }
-  if (numeric <= 1) {
-    return numeric;
-  }
-  if (numeric <= 100) {
-    return numeric / 100;
-  }
-  return 1;
-}
+  const type = String(event.type).trim().toLowerCase();
+  const details: string[] = [];
 
-function formatPublishedDate(value: string): string {
-  const parsed = new Date(value);
-  if (!Number.isFinite(parsed.getTime())) {
-    return "";
-  }
-  return parsed.toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" });
-}
-
-function sourceTitleFromUrl(url: string): string {
-  const raw = compactUrlLabel(url).split("/").slice(1).join(" ");
-  const cleaned = raw.replace(/[-_]+/g, " ").trim();
-  if (!cleaned) {
-    return compactUrlLabel(url);
-  }
-  return cleaned.slice(0, 72);
-}
-
-function buildSourceCardsFromTrace(
-  traceEvents: TraceEventItem[] | undefined,
-  fallbackUrls: string[]
-): SourceCardItem[] {
-  const byUrl = new Map<string, SourceCardItem>();
-  const upsert = (item: Partial<SourceCardItem> & { url: string }) => {
-    const url = normalizeHttpUrl(item.url);
-    if (!url) {
-      return;
+  if (type === "query_plan_created" || type === "query_planner_completed") {
+    const planner = String(payload.planner ?? "").trim();
+    const llmUsed = typeof payload.llm_used === "boolean" ? payload.llm_used : undefined;
+    if (planner) {
+      details.push(
+        `Planner: ${planner}${llmUsed === true ? " (llm)" : llmUsed === false ? " (heuristic)" : ""}`
+      );
     }
-    const existing = byUrl.get(url);
-    const merged: SourceCardItem = {
-      url,
-      domain: item.domain || existing?.domain || displayWebsite(url),
-      title: item.title || existing?.title || sourceTitleFromUrl(url),
-      publishedDate: item.publishedDate || existing?.publishedDate || "",
-      trustScore: item.trustScore ?? existing?.trustScore,
-    };
-    byUrl.set(url, merged);
-  };
-
-  const tryObject = (value: unknown) => {
-    if (!value || typeof value !== "object") {
-      return;
+    const queryLine = compactThoughtLine("Planner queries", normalizeTraceTextList(payload.queries, 4));
+    if (queryLine) {
+      details.push(queryLine);
     }
-    const record = value as Record<string, unknown>;
-    const url =
-      normalizeHttpUrl(record.url) ||
-      normalizeHttpUrl(record.source_url) ||
-      normalizeHttpUrl(record.link) ||
-      normalizeHttpUrl(record.href);
-    if (!url) {
-      return;
-    }
-    upsert({
-      url,
-      title: String(record.title ?? "").trim(),
-      publishedDate: String(record.published_date ?? record.date ?? "").trim(),
-      trustScore: normalizeTrustScore(record.trust_score),
-    });
-  };
-
-  for (const event of traceEvents ?? []) {
-    const payload = event.payload;
-    if (!payload || typeof payload !== "object") {
-      continue;
-    }
-    const record = payload as Record<string, unknown>;
-    const keys = ["source_urls", "urls", "sources", "results", "facts", "items", "citations"];
-    for (const key of keys) {
-      const value = record[key];
-      if (!value) {
-        continue;
-      }
-      if (typeof value === "string") {
-        const urls = value.match(/https?:\/\/[^\s)"']+/gi) ?? [];
-        for (const url of urls) {
-          upsert({ url });
-        }
-        continue;
-      }
-      if (Array.isArray(value)) {
-        for (const entry of value) {
-          if (typeof entry === "string") {
-            upsert({ url: entry });
-          } else {
-            tryObject(entry);
-          }
-        }
-        continue;
-      }
-      tryObject(value);
+    const subquestionLine = compactThoughtLine(
+      "Planner checks",
+      normalizeTraceTextList(payload.subquestions, 4)
+    );
+    if (subquestionLine) {
+      details.push(subquestionLine);
     }
   }
 
-  for (const url of fallbackUrls) {
-    upsert({ url });
+  if (type === "search_started") {
+    const searchLine = compactThoughtLine("Searching", normalizeTraceTextList(payload.queries, 4));
+    if (searchLine) {
+      details.push(searchLine);
+    }
   }
 
-  return Array.from(byUrl.values())
-    .sort((a, b) => {
-      const aTrust = a.trustScore ?? -1;
-      const bTrust = b.trustScore ?? -1;
-      if (aTrust !== bTrust) {
-        return bTrust - aTrust;
-      }
-      if (a.publishedDate && !b.publishedDate) {
-        return -1;
-      }
-      if (!a.publishedDate && b.publishedDate) {
-        return 1;
-      }
-      return a.domain.localeCompare(b.domain);
-    })
-    .slice(0, 24);
+  if (type === "gaps_identified" || type === "retrieval_verification") {
+    const missing = normalizeTraceTextList(payload.missing_subquestions, 3);
+    const missingLine = compactThoughtLine("Coverage gaps", missing);
+    if (missingLine) {
+      details.push(missingLine);
+    }
+    const followUps = normalizeTraceTextList(payload.follow_up_queries, 3);
+    const followUpLine = compactThoughtLine("Follow-up queries", followUps);
+    if (followUpLine) {
+      details.push(followUpLine);
+    }
+    const uniqueDomainCount = Number(payload.unique_domain_count);
+    const minUniqueDomains = Number(payload.min_unique_domains);
+    if (Number.isFinite(uniqueDomainCount) && Number.isFinite(minUniqueDomains)) {
+      details.push(`Domain coverage: ${uniqueDomainCount}/${minUniqueDomains}`);
+    }
+  }
+
+  return details.slice(0, 4);
 }
 
 function formatDurationLabel(totalSeconds: number): string {
@@ -535,8 +464,7 @@ function extractTraceWebsites(payload?: Record<string, unknown>): string[] {
   const urls = new Set<string>();
   const collect = (value: unknown) => {
     if (typeof value === "string") {
-      const matches = value.match(/https?:\/\/[^\s)"']+/gi) ?? [];
-      for (const match of matches) {
+      for (const match of extractUrlsFromText(value)) {
         urls.add(displayWebsite(match));
       }
       return;
@@ -567,9 +495,8 @@ function extractTraceUrls(payload?: Record<string, unknown>): string[] {
   const urls = new Set<string>();
   const collect = (value: unknown) => {
     if (typeof value === "string") {
-      const matches = value.match(/https?:\/\/[^\s)"']+/gi) ?? [];
-      for (const match of matches) {
-        urls.add(match.trim());
+      for (const match of extractUrlsFromText(value)) {
+        urls.add(match);
       }
       return;
     }
@@ -632,9 +559,6 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const [autoScrollPaused, setAutoScrollPaused] = useState(false);
-  const [activeActivityMessageId, setActiveActivityMessageId] = useState("");
-  const [showAllActivityEvents, setShowAllActivityEvents] = useState(false);
-  const [showAllActivitySources, setShowAllActivitySources] = useState(false);
 
   const chatContainerRef = useRef<HTMLDivElement | null>(null);
   const messageEndRef = useRef<HTMLDivElement | null>(null);
@@ -815,24 +739,6 @@ export default function App() {
     };
   }, [auth, activeJobId, isSending]);
 
-  useEffect(() => {
-    if (!activeActivityMessageId) {
-      return;
-    }
-    setShowAllActivityEvents(false);
-    setShowAllActivitySources(false);
-  }, [activeActivityMessageId]);
-
-  useEffect(() => {
-    if (!activeActivityMessageId) {
-      return;
-    }
-    const exists = messages.some((message) => message.id === activeActivityMessageId);
-    if (!exists) {
-      setActiveActivityMessageId("");
-    }
-  }, [activeActivityMessageId, messages]);
-
   const enrichedConversations = useMemo(() => {
     return conversations.map((item) => {
       const meta = conversationMetaById[item.conversationId] ?? {};
@@ -909,61 +815,6 @@ export default function App() {
       "Give me a step-by-step action plan",
     ];
   }, [messages]);
-  const selectedActivityMessage = useMemo(() => {
-    if (!activeActivityMessageId) {
-      return null;
-    }
-    return messages.find((message) => message.id === activeActivityMessageId) ?? null;
-  }, [activeActivityMessageId, messages]);
-  const selectedActivityEvents = useMemo(() => {
-    if (!selectedActivityMessage?.traceEvents?.length) {
-      return [];
-    }
-    const allEvents = selectedActivityMessage.traceEvents.slice(-40);
-    if (showAllActivityEvents) {
-      return allEvents.slice(-20);
-    }
-    return allEvents.filter((event) => isEssentialTraceEvent(event)).slice(-12);
-  }, [selectedActivityMessage, showAllActivityEvents]);
-  const selectedDecisionEvents = useMemo(() => {
-    return selectedActivityEvents.filter((event) =>
-      DECISION_TRACE_TYPES.has(String(event.type).trim().toLowerCase())
-    );
-  }, [selectedActivityEvents]);
-  const selectedTimelineEvents = useMemo(() => {
-    if (showAllActivityEvents) {
-      return selectedActivityEvents;
-    }
-    return selectedActivityEvents
-      .filter(
-        (event) => !DECISION_TRACE_TYPES.has(String(event.type).trim().toLowerCase())
-      )
-      .slice(-6);
-  }, [selectedActivityEvents, showAllActivityEvents]);
-  const selectedActivityAllSources = useMemo(() => {
-    if (!selectedActivityMessage) {
-      return [];
-    }
-    const messageSources = selectedActivityMessage.sourceUrls ?? [];
-    const inlineSources = extractUrlsFromText(selectedActivityMessage.content);
-    return Array.from(new Set([...messageSources, ...inlineSources])).slice(0, 24);
-  }, [selectedActivityMessage]);
-  const selectedActivitySourceCards = useMemo(() => {
-    if (!selectedActivityMessage) {
-      return [];
-    }
-    return buildSourceCardsFromTrace(
-      selectedActivityMessage.traceEvents,
-      selectedActivityAllSources
-    );
-  }, [selectedActivityAllSources, selectedActivityMessage]);
-  const selectedActivitySources = useMemo(() => {
-    if (showAllActivitySources) {
-      return selectedActivitySourceCards;
-    }
-    return selectedActivitySourceCards.slice(0, 8);
-  }, [selectedActivitySourceCards, showAllActivitySources]);
-
   const updateMessage = (messageId: string, updater: (message: ChatMessage) => ChatMessage) => {
     setMessages((prev) => prev.map((item) => (item.id === messageId ? updater(item) : item)));
   };
@@ -998,7 +849,6 @@ export default function App() {
     setReasoningSteps([]);
     setSearchedWebsites([]);
     setWorkLogEvents([]);
-    setActiveActivityMessageId("");
     setActiveJobId("");
     localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
     const streamAbortController = new AbortController();
@@ -1060,6 +910,9 @@ export default function App() {
       const phase = pendingPhaseText(latestServerStatus, elapsedSeconds);
       updateMessage(assistantId, (item) => ({
         ...item,
+        workedForLabel: formatDurationLabel((Date.now() - pendingStartedAt) / 1000),
+        reasoningSteps: messageReasoningSteps,
+        searchedWebsites: messageSearchedWebsites,
         content: `${phase}${waitingFrames[waitingFrameIndex]}\nStill working (${elapsedSeconds}s)`,
       }));
     }, 350);
@@ -1072,6 +925,24 @@ export default function App() {
     const stopThinking = () => {
       window.clearInterval(thinkingInterval);
     };
+    const syncAssistantThoughtMeta = () => {
+      updateMessage(assistantId, (item) => ({
+        ...item,
+        workedForLabel: formatDurationLabel((Date.now() - pendingStartedAt) / 1000),
+        sourceUrls:
+          item.sourceUrls?.length
+            ? item.sourceUrls
+            : Array.from(traceSourceUrls).slice(0, 12),
+        reasoningSteps: messageReasoningSteps,
+        searchedWebsites: messageSearchedWebsites,
+        traceEvents: messageTraceEvents.slice(-50),
+        trustConfidence,
+        trustFreshness,
+        trustContradiction,
+        claimCitationCoverage,
+        uncertaintyReasons,
+      }));
+    };
     const addReasoningSteps = (steps: string[] | undefined) => {
       if (!steps?.length) {
         return;
@@ -1082,6 +953,7 @@ export default function App() {
       }
       messageReasoningSteps = mergeUniqueStrings(messageReasoningSteps, filtered, 12);
       setReasoningSteps((prev) => mergeUniqueStrings(prev, filtered, 8));
+      syncAssistantThoughtMeta();
     };
     const addSearchedWebsites = (websites: string[] | undefined) => {
       if (!websites?.length) {
@@ -1090,6 +962,7 @@ export default function App() {
       const normalized = websites.map(displayWebsite);
       messageSearchedWebsites = mergeUniqueStrings(messageSearchedWebsites, normalized, 15);
       setSearchedWebsites((prev) => mergeUniqueStrings(prev, normalized, 8));
+      syncAssistantThoughtMeta();
     };
     const setCurrentJob = (jobId: string | undefined) => {
       const clean = String(jobId ?? "").trim();
@@ -1122,10 +995,16 @@ export default function App() {
         }
       }
       setWorkLogEvents((prev) => mergeTraceEvents(prev, [trace]));
-      addReasoningSteps([traceLabel(trace.type)]);
+      const traceDetails = traceThoughtDetails(trace);
+      if (isThoughtTraceEvent(trace.type)) {
+        addReasoningSteps([traceLabel(trace.type), ...traceDetails]);
+      } else if (traceDetails.length) {
+        addReasoningSteps(traceDetails);
+      }
       addSearchedWebsites(extractTraceWebsites(trace.payload));
       setStatusText(`Status: ${traceLabel(trace.type)}`);
       setStatusError(false);
+      syncAssistantThoughtMeta();
     };
     const finalizeAssistantMeta = (content: string) => {
       const finalizedAt = Date.now();
@@ -1376,7 +1255,6 @@ export default function App() {
     setReasoningSteps([]);
     setSearchedWebsites([]);
     setWorkLogEvents([]);
-    setActiveActivityMessageId("");
     setActiveJobId("");
     localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
     setMessages([
@@ -1417,12 +1295,6 @@ export default function App() {
 
   const handleReaction = (messageId: string, reaction: ReactionType) => {
     updateMessage(messageId, (item) => ({ ...item, reaction }));
-  };
-
-  const handleOpenActivity = (messageId: string) => {
-    setShowAllActivityEvents(false);
-    setShowAllActivitySources(false);
-    setActiveActivityMessageId(messageId);
   };
 
   const handleSubmitFromComposer = async (rawInput: string) => {
@@ -1548,7 +1420,6 @@ export default function App() {
     setReasoningSteps([]);
     setSearchedWebsites([]);
     setWorkLogEvents([]);
-    setActiveActivityMessageId("");
     setActiveJobId("");
     setCanCancelQueued(false);
     setIsAwaitingFirstChunk(false);
@@ -1577,7 +1448,6 @@ export default function App() {
           setReasoningSteps([]);
           setSearchedWebsites([]);
           setWorkLogEvents([]);
-          setActiveActivityMessageId("");
           setActiveJobId("");
           localStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
           setStatusText("New chat started");
@@ -1633,31 +1503,6 @@ export default function App() {
                     <span className="ml-1">Working...</span>
                   </div>
                 ) : null}
-                {reasoningSteps.length ? (
-                  <details className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
-                    <summary className="cursor-pointer select-none">Reasoning progress</summary>
-                    <ul className="mt-1 space-y-0.5 rounded bg-blue-50/70 px-2 py-1 text-[11px] text-slate-700 dark:bg-slate-800 dark:text-slate-200">
-                      {reasoningSteps.map((step) => (
-                        <li key={step}>- {step}</li>
-                      ))}
-                    </ul>
-                  </details>
-                ) : null}
-                {searchedWebsites.length ? (
-                  <details className="mt-1 text-[11px] text-slate-500 dark:text-slate-400">
-                    <summary className="cursor-pointer select-none">Websites searched</summary>
-                    <div className="mt-1 flex flex-wrap gap-1 rounded bg-blue-50/70 px-2 py-1 dark:bg-slate-800">
-                      {searchedWebsites.map((site) => (
-                        <code
-                          key={site}
-                          className="rounded border border-blue-100 bg-white px-1.5 py-0.5 text-[11px] text-brand-blue dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
-                        >
-                          {site}
-                        </code>
-                      ))}
-                    </div>
-                  </details>
-                ) : null}
               </div>
               {isSending ? (
                 <button
@@ -1694,7 +1539,6 @@ export default function App() {
                   onRegenerate={handleRegenerate}
                   onRegenerateInDeep={handleRegenerateInDeep}
                   onRetryWebOnly={handleRetryWebOnly}
-                  onOpenActivity={handleOpenActivity}
                   onReaction={handleReaction}
                 />
               ))
@@ -1709,209 +1553,6 @@ export default function App() {
             <div ref={messageEndRef} />
           </div>
         </main>
-
-        {selectedActivityMessage ? (
-          <>
-            <button
-              type="button"
-              className="fixed inset-0 z-30 bg-slate-950/25 lg:hidden"
-              aria-label="Close activity panel"
-              onClick={() => setActiveActivityMessageId("")}
-            />
-            <aside className="fixed right-0 top-0 z-40 h-full w-full max-w-[392px] border-l border-blue-100 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-950 lg:right-3 lg:top-3 lg:h-[calc(100%-1.5rem)] lg:rounded-2xl lg:border">
-              <div className="flex h-full flex-col">
-                <div className="flex items-center justify-between border-b border-blue-100 bg-gradient-to-b from-blue-50/75 to-rose-50/30 px-4 py-3.5 dark:border-slate-800 dark:from-slate-900/90 dark:to-slate-950">
-                  <div>
-                    <p className="text-[15px] font-semibold text-slate-800 dark:text-slate-100">
-                      Activity {selectedActivityMessage.workedForLabel ? `· ${selectedActivityMessage.workedForLabel}` : ""}
-                    </p>
-                    <p className="text-xs text-slate-500 dark:text-slate-400">
-                      {new Date(selectedActivityMessage.createdAt).toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => setActiveActivityMessageId("")}
-                    className="rounded-lg border border-slate-200 p-1.5 text-slate-600 hover:bg-slate-100 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
-                    aria-label="Close activity panel"
-                  >
-                    <CloseIcon className="h-4 w-4" />
-                  </button>
-                </div>
-
-                <div className="flex-1 space-y-5 overflow-y-auto px-4 py-4">
-                  <section className="rounded-2xl border border-blue-100 bg-blue-50/40 p-3 dark:border-slate-800 dark:bg-slate-900/40">
-                    <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                      Summary
-                    </p>
-                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                      {typeof selectedActivityMessage.trustConfidence === "number" ? (
-                        <span className="rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:border-emerald-900/70 dark:bg-emerald-950/40 dark:text-emerald-200">
-                          Confidence {(selectedActivityMessage.trustConfidence * 100).toFixed(0)}%
-                        </span>
-                      ) : null}
-                      {selectedActivityMessage.trustFreshness ? (
-                        <span className="rounded-full border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-medium capitalize text-brand-blue dark:border-blue-900/70 dark:bg-blue-950/40 dark:text-blue-200">
-                          Freshness {selectedActivityMessage.trustFreshness}
-                        </span>
-                      ) : null}
-                      {typeof selectedActivityMessage.claimCitationCoverage === "number" ? (
-                        <span className="rounded-full border border-rose-200 bg-rose-50 px-2 py-0.5 text-[11px] font-medium text-rose-700 dark:border-rose-900/70 dark:bg-rose-950/40 dark:text-rose-200">
-                          Claim citations {(selectedActivityMessage.claimCitationCoverage * 100).toFixed(0)}%
-                        </span>
-                      ) : null}
-                      {selectedActivityMessage.trustContradiction ? (
-                        <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:border-amber-900/70 dark:bg-amber-950/40 dark:text-amber-200">
-                          Conflict detected
-                        </span>
-                      ) : null}
-                    </div>
-                    {selectedDecisionEvents.length ? (
-                      <p className="mt-2 text-[12px] text-slate-600 dark:text-slate-300">
-                        Latest decision:{" "}
-                        <span className="font-medium text-slate-800 dark:text-slate-100">
-                          {traceLabel(selectedDecisionEvents[selectedDecisionEvents.length - 1].type)}
-                        </span>
-                      </p>
-                    ) : null}
-                    {selectedActivityMessage.uncertaintyReasons?.length ? (
-                      <ul className="mt-2 space-y-1 rounded-lg border border-amber-200/70 bg-amber-50/70 px-2.5 py-2 text-[11px] text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/30 dark:text-amber-200">
-                        {selectedActivityMessage.uncertaintyReasons.map((reason) => (
-                          <li key={reason}>- {reason}</li>
-                        ))}
-                      </ul>
-                    ) : null}
-                  </section>
-
-                  <section className="rounded-2xl border border-blue-100 bg-blue-50/35 p-3 dark:border-slate-800 dark:bg-slate-900/40">
-                    <div className="mb-2.5 flex items-center gap-2 text-[15px] font-semibold text-slate-800 dark:text-slate-100">
-                      <CheckCircleIcon className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
-                      Decisions
-                    </div>
-                    {selectedDecisionEvents.length ? (
-                      <ul className="space-y-1.5">
-                        {selectedDecisionEvents.slice(-8).map((event, index) => (
-                          <li
-                            key={`${event.type}-${event.timestamp ?? index}`}
-                            className="rounded-xl border border-blue-100 bg-white px-2.5 py-2 dark:border-slate-700 dark:bg-slate-900"
-                          >
-                            <div className="flex items-start justify-between gap-2">
-                              <p className="text-[13px] font-medium text-slate-700 dark:text-slate-200">
-                                {traceLabel(event.type)}
-                              </p>
-                              <span className="text-[10px] text-slate-500 dark:text-slate-400">
-                                {traceTimeLabel(event.timestamp)}
-                              </span>
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="text-xs text-slate-500 dark:text-slate-400">No decision log captured.</p>
-                    )}
-                  </section>
-
-                  <section className="rounded-2xl border border-blue-100 bg-blue-50/35 p-3 dark:border-slate-800 dark:bg-slate-900/40">
-                    <div className="mb-2.5 flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-2 text-[15px] font-semibold text-slate-800 dark:text-slate-100">
-                        <GlobeIcon className="h-4 w-4 text-brand-blue dark:text-blue-400" />
-                        Timeline
-                      </div>
-                      {selectedActivityMessage.traceEvents?.length ? (
-                        <button
-                          type="button"
-                          onClick={() => setShowAllActivityEvents((prev) => !prev)}
-                          className="rounded-full border border-blue-200 bg-white px-2 py-0.5 text-[10px] font-medium text-brand-blue hover:bg-blue-50 dark:border-slate-700 dark:bg-slate-900 dark:text-blue-300 dark:hover:bg-slate-800"
-                        >
-                          {showAllActivityEvents ? "Decision view" : "Full timeline"}
-                        </button>
-                      ) : null}
-                    </div>
-                    {selectedTimelineEvents.length ? (
-                      <ul className="space-y-1.5">
-                        {selectedTimelineEvents.map((event, index) => (
-                          <li
-                            key={`${event.type}-${event.timestamp ?? index}`}
-                            className="rounded-lg border border-blue-100 bg-white px-2 py-1.5 text-[12px] dark:border-slate-700 dark:bg-slate-900"
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <p className="text-slate-700 dark:text-slate-200">{traceLabel(event.type)}</p>
-                              <span className="text-[10px] text-slate-500 dark:text-slate-400">
-                                {traceTimeLabel(event.timestamp)}
-                              </span>
-                            </div>
-                          </li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <p className="text-xs text-slate-500 dark:text-slate-400">Timeline condensed into decisions.</p>
-                    )}
-                  </section>
-
-                  <section className="rounded-2xl border border-blue-100 bg-blue-50/35 p-3 dark:border-slate-800 dark:bg-slate-900/40">
-                    <div className="mb-2.5 flex items-center justify-between gap-3">
-                      <div className="flex items-center gap-2 text-[15px] font-semibold text-slate-800 dark:text-slate-100">
-                        <LinkIcon className="h-4 w-4 text-brand-red dark:text-rose-300" />
-                        Sources · {selectedActivitySourceCards.length}
-                      </div>
-                      {selectedActivitySourceCards.length > 8 ? (
-                        <button
-                          type="button"
-                          onClick={() => setShowAllActivitySources((prev) => !prev)}
-                          className="rounded-full border border-blue-200 bg-white px-2 py-0.5 text-[10px] font-medium text-brand-blue hover:bg-blue-50 dark:border-slate-700 dark:bg-slate-900 dark:text-blue-300 dark:hover:bg-slate-800"
-                        >
-                          {showAllActivitySources ? "Less" : "More"}
-                        </button>
-                      ) : null}
-                    </div>
-                    {selectedActivitySources.length ? (
-                      <div className="space-y-1.5">
-                        {selectedActivitySources.map((source) => (
-                          <a
-                            key={source.url}
-                            href={source.url}
-                            target="_blank"
-                            rel="noreferrer"
-                            className="block rounded-xl border border-blue-100 bg-white px-2.5 py-2 text-xs hover:bg-blue-50 dark:border-slate-700 dark:bg-slate-900 dark:hover:bg-slate-800"
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-600 dark:text-slate-300">
-                                {source.domain}
-                              </span>
-                              {typeof source.trustScore === "number" ? (
-                                <span className="rounded-full border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:border-emerald-900/70 dark:bg-emerald-950/40 dark:text-emerald-200">
-                                  {(source.trustScore * 100).toFixed(0)}%
-                                </span>
-                              ) : null}
-                            </div>
-                            <span className="mt-1 block text-[12px] leading-4 text-slate-700 dark:text-slate-200">
-                              {source.title}
-                            </span>
-                            <div className="mt-1 flex items-center justify-between gap-2">
-                              <span className="truncate text-[11px] text-brand-blue dark:text-blue-300">
-                                {compactUrlLabel(source.url)}
-                              </span>
-                              {source.publishedDate ? (
-                                <span className="text-[10px] text-slate-500 dark:text-slate-400">
-                                  {formatPublishedDate(source.publishedDate)}
-                                </span>
-                              ) : null}
-                            </div>
-                          </a>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="text-xs text-slate-500 dark:text-slate-400">No citations were captured.</p>
-                    )}
-                  </section>
-                </div>
-              </div>
-            </aside>
-          </>
-        ) : null}
 
         {showJumpToLatest && messages.length ? (
           <button

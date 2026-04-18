@@ -184,7 +184,24 @@ function extractText(payload: Record<string, unknown>): string {
 
 function extractUrls(input: string): string[] {
   const matches = input.match(/https?:\/\/[^\s)"']+/gi) ?? [];
-  return Array.from(new Set(matches.map((item) => item.trim())));
+  const normalized = matches
+    .map((item) => normalizeUrlCandidate(item))
+    .filter((item): item is string => Boolean(item));
+  return Array.from(new Set(normalized));
+}
+
+function normalizeUrlCandidate(raw: string): string | null {
+  const trimmed = String(raw ?? "").trim().replace(/[),.;\]]+$/g, "");
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    const normalizedPath = parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "");
+    return `${parsed.protocol}//${parsed.host}${normalizedPath}${parsed.search}`;
+  } catch {
+    return null;
+  }
 }
 
 function collectUrlCandidates(value: unknown, out: Set<string>): void {

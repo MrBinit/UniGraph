@@ -23,9 +23,9 @@ async def test_aretrieve_web_chunks_merges_ai_overview_and_organic(monkeypatch):
     monkeypatch.setattr(service.settings.web_search, "allowed_domain_suffixes", [])
 
     async def _fake_batch(queries: list[str], **kwargs):
-        assert "oxford ai admission" in queries
-        assert len(queries) >= 2
-        return [
+        assert any("oxford ai admission" in item for item in queries)
+        assert len(queries) >= 1
+        responses = [
             {
                 "query": queries[0],
                 "result": {
@@ -42,21 +42,25 @@ async def test_aretrieve_web_chunks_merges_ai_overview_and_organic(monkeypatch):
                     ],
                 },
                 "error": "",
-            },
-            {
-                "query": queries[1],
-                "result": {
-                    "organic_results": [
-                        {
-                            "title": "Oxford MSc AI",
-                            "link": "https://uni-example.de/oxford-ai",
-                            "snippet": "Duplicate row from another variant.",
-                        }
-                    ],
-                },
-                "error": "",
-            },
+            }
         ]
+        if len(queries) > 1:
+            responses.append(
+                {
+                    "query": queries[1],
+                    "result": {
+                        "organic_results": [
+                            {
+                                "title": "Oxford MSc AI",
+                                "link": "https://uni-example.de/oxford-ai",
+                                "snippet": "Duplicate row from another variant.",
+                            }
+                        ],
+                    },
+                    "error": "",
+                }
+            )
+        return responses
 
     async def _fake_fetch_pages(rows: list[dict]):
         assert rows[0]["url"] == "https://uni-example.de/oxford-ai"
@@ -976,3 +980,118 @@ def test_domain_authority_prefers_de_or_eu_over_com():
 
     assert de_score > com_score
     assert eu_score > com_score
+
+
+def test_required_fields_from_query_detects_explicit_fields():
+    fields = service._required_fields_from_query(
+        "Tell me course requirements, language requirements for international students, and application deadline."
+    )
+    ids = [str(item.get("id", "")).strip() for item in fields]
+    assert "admission_requirements" in ids
+    assert "language_requirements" in ids
+    assert "application_deadline" in ids
+
+
+def test_required_field_coverage_for_language_requires_score():
+    required_fields = service._required_fields_from_query(
+        "language requirements for international students"
+    )
+    language_only = [
+        {
+            "content": "Applicants must provide proof of English proficiency.",
+            "metadata": {"url": "https://uni-example.de/admission"},
+        }
+    ]
+    with_scores = [
+        {
+            "content": "English requirement: IELTS 6.5 or TOEFL iBT 90.",
+            "metadata": {"url": "https://uni-example.de/admission"},
+        }
+    ]
+
+    weak = service._required_field_coverage(required_fields, language_only)
+    strong = service._required_field_coverage(required_fields, with_scores)
+
+    assert "language_requirements" in weak["missing_ids"]
+    assert weak["coverage"] < 1.0
+    assert "language_requirements" not in strong["missing_ids"]
+    assert strong["coverage"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_aretrieve_web_chunks_deep_loop_requeries_until_required_field_is_complete(monkeypatch):
+    monkeypatch.setattr(service.settings.web_search, "multi_query_enabled", False)
+    monkeypatch.setattr(service.settings.web_search, "query_planner_enabled", True)
+    monkeypatch.setattr(service.settings.web_search, "retrieval_loop_enabled", True)
+    monkeypatch.setattr(service.settings.web_search, "retrieval_loop_max_steps", 2)
+    monkeypatch.setattr(service.settings.web_search, "retrieval_loop_max_gap_queries", 1)
+    monkeypatch.setattr(service.settings.web_search, "allowed_domain_suffixes", [])
+
+    async def _fake_plan(_query: str, _allowed_suffixes: list[str]):
+        return {
+            "queries": ["uni sample msc ai language requirements"],
+            "subquestions": [],
+            "planner": "heuristic",
+            "llm_used": False,
+        }
+
+    calls: list[list[str]] = []
+
+    async def _fake_payloads(queries: list[str], *, top_k: int):
+        _ = top_k
+        calls.append(list(queries))
+        query_text = " ".join(queries).lower()
+        if "minimum score" in query_text or "ielts" in query_text or "toefl" in query_text:
+            return [
+                {
+                    "organic_results": [
+                        {
+                            "title": "Language Requirements",
+                            "link": "https://uni-example.de/language",
+                            "snippet": "IELTS 6.5 or TOEFL iBT 90.",
+                        }
+                    ]
+                }
+            ]
+        return [
+            {
+                "organic_results": [
+                    {
+                        "title": "Admission Overview",
+                        "link": "https://uni-example.de/admission",
+                        "snippet": "Proof of English proficiency is required.",
+                    }
+                ]
+            }
+        ]
+
+    async def _fake_fetch_pages(rows: list[dict], **_kwargs):
+        payload: dict[str, dict] = {}
+        for row in rows:
+            url = str(row.get("url", "")).strip()
+            if "language" in url:
+                payload[url] = {
+                    "content": "Language requirement: IELTS 6.5 overall or TOEFL iBT 90.",
+                    "published_date": "2026-03-10",
+                }
+            else:
+                payload[url] = {
+                    "content": "Applicants must provide proof of English proficiency.",
+                    "published_date": "2026-03-10",
+                }
+        return payload
+
+    monkeypatch.setattr(service, "_resolve_query_plan", _fake_plan)
+    monkeypatch.setattr(service, "_asearch_payloads", _fake_payloads)
+    monkeypatch.setattr(service, "_afetch_organic_pages", _fake_fetch_pages)
+
+    result = await service.aretrieve_web_chunks(
+        "tell me language requirements for international students",
+        top_k=3,
+        search_mode="deep",
+    )
+
+    assert len(calls) == 2
+    assert result["verification"]["required_field_coverage"] == 1.0
+    assert result["verification"]["required_fields_missing"] == []
+    assert result["verification"]["verified"] is True

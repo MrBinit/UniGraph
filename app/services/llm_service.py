@@ -133,6 +133,10 @@ _GENERIC_PLACEHOLDER_MARKERS = (
     "could you clarify your question",
     "i need more details",
 )
+_LOW_SIGNAL_SCAFFOLD_LINE_RE = re.compile(
+    r"^(evidence and caveats|claim-by-claim citations|uncertainty|missing info|caveats|evidence)\s*:?\s*$",
+    flags=re.IGNORECASE,
+)
 _COMPARISON_ENTITY_STOPWORDS = {
     "for",
     "the",
@@ -335,13 +339,42 @@ def _mode_instruction_text(mode: str) -> str:
     if isinstance(configured, str) and configured.strip():
         return configured.strip()
     return (
-        "Execution mode: deep. Use multi-hop reasoning over evidence, "
-        "verify coverage and citations, and refine once when checks fail."
+        "Execution mode: deep. Use multi-hop reasoning over evidence, verify coverage and citations, "
+        "and refine once when checks fail. Prioritize completeness on required fields before finalizing."
     )
 
 
 def _mode_instruction_message(mode: str) -> dict:
     return {"role": "system", "content": _mode_instruction_text(mode)}
+
+
+def _answer_style_instruction_message(mode: str, state: dict) -> dict:
+    required_fields = state.get("required_answer_fields")
+    required_fields = required_fields if isinstance(required_fields, list) else []
+    required_text = ", ".join(str(item).strip() for item in required_fields[:6] if str(item).strip())
+    if not required_text:
+        required_text = "query-specific required fields"
+
+    if str(mode).strip().lower() == _FAST_MODE:
+        content = (
+            "Answer style policy (fast): concise and readable. Use short paragraphs or short bullets. "
+            "No internal scaffolding headings. Keep one final 'Sources' section with unique URLs only."
+        )
+        return {"role": "system", "content": content}
+
+    content = (
+        "Answer style policy (deep):\n"
+        "- Start with a 1-2 sentence direct answer.\n"
+        "- Then use clear markdown sections only when relevant (for example: Program Overview, "
+        "Eligibility Requirements, Language Requirements, Deadlines, Fees, Missing Information, Sources).\n"
+        "- Ensure required fields are explicitly covered: "
+        f"{required_text}.\n"
+        "- Keep one fact per bullet and avoid duplicated lines.\n"
+        "- Add one inline URL citation to each factual bullet.\n"
+        "- Do not output scaffolding headings like 'Evidence and caveats' or 'Claim-by-Claim Citations'.\n"
+        "- End with one 'Sources' section listing unique URLs only."
+    )
+    return {"role": "system", "content": content}
 
 
 def _insert_system_message_before_dialog(messages: list, message: dict) -> list:
@@ -445,7 +478,9 @@ def _agentic_instruction_text() -> str:
         "Internal workflow: (1) plan from provided evidence, (2) draft answer, "
         "(3) verify each factual claim has allowed inline URL citations, "
         "(4) identify uncertainty for weak/conflicting evidence, (5) revise once if needed. "
-        "Keep internal reasoning hidden. Do not output chain-of-thought."
+        "Keep internal reasoning hidden. Do not output chain-of-thought. "
+        "Final answer must be clean for users: no internal scaffolding headings, "
+        "clear sections, and one unique Sources list."
     )
 
 
@@ -1674,6 +1709,13 @@ def _derive_evidence_trust_signals(results: list[dict], state: dict) -> None:
         "unknown",
     }:
         confidence -= 0.1
+    web_required_coverage = _safe_float(state.get("web_required_field_coverage"))
+    web_required_coverage = (
+        _clamp01(web_required_coverage, fallback=1.0) if web_required_coverage is not None else None
+    )
+    if web_required_coverage is not None:
+        # Penalize confidence when deep retrieval did not close required fields.
+        confidence -= (1.0 - web_required_coverage) * 0.25
     confidence = _clamp01(confidence, fallback=0.5)
 
     state["trust_confidence"] = round(confidence, 4)
@@ -1697,6 +1739,8 @@ def _derive_evidence_trust_signals(results: list[dict], state: dict) -> None:
         uncertainty_reasons.append("Freshness is not strong for a time-sensitive question.")
     if int(state.get("retrieval_source_count", 0) or 0) < 2:
         uncertainty_reasons.append("Independent source corroboration is limited.")
+    if web_required_coverage is not None and web_required_coverage < 0.999:
+        uncertainty_reasons.append("Some requested fields are not fully verified from web evidence.")
     state["trust_uncertainty_reasons"] = uncertainty_reasons[:3]
 
     emit_trace_event(
@@ -1707,6 +1751,10 @@ def _derive_evidence_trust_signals(results: list[dict], state: dict) -> None:
             "contradiction_flag": state["trust_contradiction_flag"],
             "authority_score": state["trust_authority_score"],
             "agreement_score": state["trust_agreement_score"],
+            "web_required_field_coverage": (
+                round(web_required_coverage, 4) if web_required_coverage is not None else None
+            ),
+            "web_required_fields_missing": (state.get("web_required_fields_missing") or [])[:4],
             "uncertainty_reasons": state["trust_uncertainty_reasons"],
         },
     )
@@ -1972,6 +2020,9 @@ async def _retrieve_web_candidates_if_needed(
     state["web_fallback_attempted"] = False
     state["web_result_count"] = 0
     state["web_expansion_used"] = False
+    state["web_retrieval_verified"] = None
+    state["web_required_field_coverage"] = None
+    state["web_required_fields_missing"] = []
 
     if not (
         always_web_retrieval
@@ -2068,6 +2119,24 @@ async def _retrieve_web_candidates_if_needed(
                 or {}
             )
         web_result = web_result if isinstance(web_result, dict) else {}
+        verification = web_result.get("verification", {})
+        verification = verification if isinstance(verification, dict) else {}
+        web_required_coverage = _safe_float(verification.get("required_field_coverage"))
+        if web_required_coverage is not None:
+            state["web_required_field_coverage"] = round(
+                _clamp01(web_required_coverage, fallback=1.0),
+                4,
+            )
+        missing_required = verification.get("required_fields_missing", [])
+        if isinstance(missing_required, list):
+            state["web_required_fields_missing"] = [
+                " ".join(str(item).split()).strip()
+                for item in missing_required
+                if " ".join(str(item).split()).strip()
+            ][:6]
+        verified = verification.get("verified")
+        if isinstance(verified, bool):
+            state["web_retrieval_verified"] = verified
         query_plan = web_result.get("query_plan", {})
         emit_trace_event(
             "query_planner_completed",
@@ -2075,6 +2144,7 @@ async def _retrieve_web_candidates_if_needed(
                 "planner": str(query_plan.get("planner", "heuristic")),
                 "llm_used": bool(query_plan.get("llm_used", False)),
                 "subquestions": query_plan.get("subquestions", []),
+                "required_fields": query_plan.get("required_fields", []),
                 "queries": web_result.get("query_variants", []),
             },
         )
@@ -2179,6 +2249,7 @@ async def _retrieve_web_candidates_if_needed(
                 "source_urls": web_urls,
                 "retrieval_loop": web_result.get("retrieval_loop", {}),
                 "query_plan": web_result.get("query_plan", {}),
+                "verification": verification,
             },
         )
         if web_results:
@@ -2741,6 +2812,8 @@ def _citation_grounding_message(evidence_urls: list[str]) -> dict:
             f"- Use exactly '{_NO_RELEVANT_INFORMATION_DETAIL}' only when there is no relevant "
             "evidence at all."
         ),
+        "- Keep answer readable: no internal scaffolding labels; use user-facing headings only.",
+        "- Include exactly one final Sources section with unique URLs (no duplicates).",
         "Allowed evidence URLs:",
     ]
     for index, url in enumerate(evidence_urls, start=1):
@@ -3779,6 +3852,9 @@ def _new_metrics_state() -> dict:
         "web_fallback_attempted": False,
         "web_result_count": 0,
         "web_expansion_used": False,
+        "web_retrieval_verified": None,
+        "web_required_field_coverage": None,
+        "web_required_fields_missing": [],
         "retrieval_reranker_applied": False,
         "retrieval_reranker_ms": None,
         "retrieval_selective_before_count": 0,
@@ -3970,6 +4046,10 @@ async def _prepare_messages_for_model(
     required_fields_message = _required_fields_system_message(state)
     if required_fields_message:
         messages = _insert_system_message_before_dialog(messages, required_fields_message)
+    messages = _insert_system_message_before_dialog(
+        messages,
+        _answer_style_instruction_message(execution_mode, state),
+    )
     if bool(state.get("agentic_enabled", False)):
         messages = messages + [_agentic_instruction_message()]
 
@@ -4056,6 +4136,8 @@ def _stream_refinement_message(state: dict) -> dict:
             "Fast refine pass: keep answer concise, verify major claims against evidence, "
             "fix missing or weak citations, resolve contradictions, and return a clean, readable answer "
             "with direct inline citations and a concise Sources section. "
+            "Remove low-signal scaffolding labels (for example: Evidence and caveats, "
+            "Claim-by-Claim Citations). "
             f"Primary issues to fix: {compact_issues}."
         ),
     }
@@ -4171,12 +4253,108 @@ def _uncertainty_reasons(state: dict) -> list[str]:
         and int(state.get("retrieval_source_count", 0) or 0) < 2
     ):
         derived.append("Independent source corroboration is limited.")
+    web_required_coverage = _safe_float(state.get("web_required_field_coverage"))
+    if web_required_coverage is not None and web_required_coverage < 0.999:
+        derived.append("Some requested fields are not fully verified from web evidence.")
     return derived[:3]
 
 
 def _apply_answer_policy(result: str, state: dict) -> str:
-    # Keep model output readable; avoid server-side template rewrites.
-    return result
+    text = str(result or "").replace("\r\n", "\n").strip()
+    if not text or text in {_NO_RELEVANT_INFORMATION_DETAIL, refusal_response()}:
+        return text
+    has_sources_heading = bool(
+        re.search(r"(?im)^\s*(?:#{1,3}\s*)?sources?\s*:?\s*$", text)
+    )
+    has_scaffold_heading = any(
+        _LOW_SIGNAL_SCAFFOLD_LINE_RE.match(" ".join(line.split()).strip())
+        for line in text.splitlines()
+    )
+    if not has_scaffold_heading and not has_sources_heading:
+        return text
+
+    body, source_block = _split_sources_block(text)
+    cleaned_body = _clean_answer_body(body)
+    rebuilt = _rebuild_sources_section(cleaned_body, source_block, state)
+    return rebuilt.strip()
+
+
+def _split_sources_block(text: str) -> tuple[str, str]:
+    marker = re.search(r"(?im)^\s*(?:#{1,3}\s*)?sources?\s*:?\s*$", str(text or ""))
+    if not marker:
+        return str(text or "").strip(), ""
+    body = str(text or "")[: marker.start()].strip()
+    sources = str(text or "")[marker.end() :].strip()
+    return body, sources
+
+
+def _clean_answer_body(body: str) -> str:
+    lines = str(body or "").splitlines()
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    blank_open = False
+    for raw_line in lines:
+        line = str(raw_line).rstrip()
+        compact = " ".join(line.split()).strip()
+        if not compact:
+            if blank_open:
+                continue
+            cleaned.append("")
+            blank_open = True
+            continue
+        blank_open = False
+        if _LOW_SIGNAL_SCAFFOLD_LINE_RE.match(compact):
+            continue
+        dedupe_key = compact.lower()
+        # De-duplicate repeated verbose lines while preserving short list labels.
+        if len(compact) > 24 and dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        cleaned.append(line)
+    return "\n".join(cleaned).strip()
+
+
+def _ordered_unique_urls(values: list[str]) -> list[str]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        url = _normalized_url(str(value))
+        if not url:
+            continue
+        key = url.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(url)
+    return normalized
+
+
+def _rebuild_sources_section(body: str, source_block: str, state: dict) -> str:
+    inline_urls = _ordered_unique_urls(_CITATION_URL_RE.findall(body))
+    source_urls = _ordered_unique_urls(_CITATION_URL_RE.findall(source_block))
+    evidence_urls = _traceable_urls(state.get("evidence_urls", []), limit=12)
+    evidence_urls = _ordered_unique_urls(evidence_urls)
+
+    ordered_urls = _ordered_unique_urls(inline_urls + source_urls + evidence_urls)
+    allowed_hosts = _allowed_citation_hosts(evidence_urls)
+    if allowed_hosts:
+        filtered_urls = [
+            url
+            for url in ordered_urls
+            if _normalized_host_from_url(url) in allowed_hosts
+        ]
+        if filtered_urls:
+            ordered_urls = filtered_urls
+
+    if not ordered_urls:
+        return body
+
+    mode = str(state.get("execution_mode", _DEEP_MODE)).strip().lower()
+    limit = 8 if mode == _DEEP_MODE else 6
+    source_lines = ["Sources"] + [f"- {url}" for url in ordered_urls[:limit]]
+    if not body:
+        return "\n".join(source_lines)
+    return f"{body}\n\n" + "\n".join(source_lines)
 
 
 def _append_uncertainty_section(result: str, state: dict) -> str:
@@ -4797,6 +4975,9 @@ async def _finalize_success(context: dict, result: str) -> str:
             "claim_snippet_conflict_count": int(state.get("claim_snippet_conflict_count", 0) or 0),
             "claim_evidence_map": (state.get("claim_evidence_map") or [])[:3],
             "uncertainty_reasons": state.get("trust_uncertainty_reasons", []),
+            "web_retrieval_verified": state.get("web_retrieval_verified"),
+            "web_required_field_coverage": state.get("web_required_field_coverage"),
+            "web_required_fields_missing": (state.get("web_required_fields_missing") or [])[:4],
             "abstain_reason": str(state.get("abstain_reason", "")),
             "required_field_coverage": state.get("required_field_coverage"),
             "required_fields_missing": (state.get("required_fields_missing") or [])[:4],

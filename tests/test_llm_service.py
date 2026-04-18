@@ -2137,3 +2137,77 @@ async def test_augment_messages_with_retrieval_fanout_prefetches_web_for_deep_mo
 
     assert detail is None
     assert messages == base_messages
+
+
+def test_derive_evidence_trust_signals_penalizes_incomplete_web_required_fields():
+    results = [
+        {
+            "content": "Official requirements include ECTS and language scores.",
+            "metadata": {
+                "url": "https://uni-a.de/program",
+                "published_date": "2026-03-10",
+                "trust_components": {"authority": 0.9, "agreement": 0.85, "recency": 0.9},
+            },
+        },
+        {
+            "content": "Application timeline and documents are listed.",
+            "metadata": {
+                "url": "https://uni-b.de/admission",
+                "published_date": "2026-03-12",
+                "trust_components": {"authority": 0.88, "agreement": 0.83, "recency": 0.9},
+            },
+        },
+    ]
+
+    state_complete = {
+        "safe_user_prompt": "admission requirements and language scores",
+        "retrieval_source_count": 2,
+        "web_required_field_coverage": 1.0,
+        "web_required_fields_missing": [],
+    }
+    llm_service._derive_evidence_trust_signals(results, state_complete)
+
+    state_incomplete = {
+        "safe_user_prompt": "admission requirements and language scores",
+        "retrieval_source_count": 2,
+        "web_required_field_coverage": 0.25,
+        "web_required_fields_missing": ["language_requirements"],
+    }
+    llm_service._derive_evidence_trust_signals(results, state_incomplete)
+
+    complete_conf = float(state_complete.get("trust_confidence") or 0.0)
+    incomplete_conf = float(state_incomplete.get("trust_confidence") or 0.0)
+
+    assert incomplete_conf < complete_conf
+    assert (
+        "Some requested fields are not fully verified from web evidence."
+        in state_incomplete["trust_uncertainty_reasons"]
+    )
+
+
+def test_apply_answer_policy_keeps_plain_text_without_urls_or_scaffold():
+    state = llm_service._new_metrics_state()
+    text = "Primary response without URL citations."
+    assert llm_service._apply_answer_policy(text, state) == text
+
+
+def test_apply_answer_policy_rebuilds_clean_sources_section():
+    state = llm_service._new_metrics_state()
+    state["execution_mode"] = "deep"
+    state["evidence_urls"] = [
+        "https://uni-example.de/program",
+        "https://daad.de/program",
+    ]
+    raw = (
+        "Evidence and caveats:\n"
+        "- Program is English-taught (https://uni-example.de/program)\n"
+        "Claim-by-Claim Citations\n"
+        "Sources:\n"
+        "- https://uni-example.de/program\n"
+        "- https://uni-example.de/program\n"
+    )
+    cleaned = llm_service._apply_answer_policy(raw, state)
+    assert "Evidence and caveats" not in cleaned
+    assert "Claim-by-Claim Citations" not in cleaned
+    assert "Sources" in cleaned
+    assert cleaned.count("https://uni-example.de/program") == 2

@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import { ActivityIcon, DislikeIcon, LikeIcon, SparklesIcon } from "./Icons";
+import { DislikeIcon, LikeIcon, SparklesIcon } from "./Icons";
 import type { ChatMessage, ReactionType } from "../types";
 
 interface MessageCardProps {
@@ -10,7 +10,6 @@ interface MessageCardProps {
   onRegenerate: (sourcePrompt: string) => void;
   onRegenerateInDeep: (sourcePrompt: string) => void;
   onRetryWebOnly: (sourcePrompt: string) => void;
-  onOpenActivity: (messageId: string) => void;
   onReaction: (messageId: string, reaction: ReactionType) => void;
 }
 
@@ -27,7 +26,42 @@ function cardClass(role: ChatMessage["role"]): string {
 
 function extractUrlsFromText(input: string): string[] {
   const matches = input.match(/https?:\/\/[^\s)"']+/gi) ?? [];
-  return Array.from(new Set(matches.map((item) => item.trim())));
+  const urls = matches
+    .map((item) => normalizeUrlCandidate(item))
+    .filter((item): item is string => Boolean(item));
+  return uniqueUrls(urls);
+}
+
+function normalizeUrlCandidate(raw: string): string | null {
+  const trimmed = String(raw ?? "").trim().replace(/[),.;\]]+$/g, "");
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    const normalizedPath = parsed.pathname === "/" ? "" : parsed.pathname.replace(/\/+$/, "");
+    return `${parsed.protocol}//${parsed.host}${normalizedPath}${parsed.search}`;
+  } catch {
+    return null;
+  }
+}
+
+function uniqueUrls(values: string[]): string[] {
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const value of values) {
+    const normalized = normalizeUrlCandidate(value);
+    if (!normalized) {
+      continue;
+    }
+    const key = normalized.toLowerCase();
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    deduped.push(normalized);
+  }
+  return deduped;
 }
 
 function displayWebsite(value: string): string {
@@ -39,19 +73,29 @@ function displayWebsite(value: string): string {
   }
 }
 
-function compactUrlLabel(url: string): string {
-  return url.replace(/^https?:\/\//i, "").replace(/\/$/, "");
+function compactUrlPath(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const path = `${parsed.pathname}${parsed.search}`.trim();
+    return path && path !== "/" ? path : "/";
+  } catch {
+    return "/";
+  }
 }
 
 function splitAnswerSections(content: string): { primary: string; sourcesBlock: string } {
   const text = String(content ?? "");
-  const marker = text.match(/\n\s*Sources?:\s*/i);
+  const marker = text.match(/(?:^|\n)\s*(?:#{1,3}\s*)?Sources?:?\s*(?:\n|$)/i);
   if (!marker || typeof marker.index !== "number") {
     return { primary: text.trim(), sourcesBlock: "" };
   }
   const primary = text.slice(0, marker.index).trim();
   const sourcesBlock = text.slice(marker.index).trim();
   return { primary, sourcesBlock };
+}
+
+function sourceUrlsFromBlock(sourcesBlock: string): string[] {
+  return extractUrlsFromText(sourcesBlock || "");
 }
 
 function compactPercent(value?: number): string | null {
@@ -62,22 +106,84 @@ function compactPercent(value?: number): string | null {
   return `${pct}%`;
 }
 
+function compactThoughtStep(step: string, maxChars = 140): string {
+  const normalized = String(step).replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxChars - 1))}…`;
+}
+
+function isPlannerThoughtStep(step: string): boolean {
+  const normalized = String(step).trim().toLowerCase();
+  return (
+    normalized.startsWith("planner:") ||
+    normalized.startsWith("planner queries:") ||
+    normalized.startsWith("planner checks:") ||
+    normalized.startsWith("searching:") ||
+    normalized.startsWith("coverage gaps:") ||
+    normalized.startsWith("follow-up queries:") ||
+    normalized.startsWith("domain coverage:")
+  );
+}
+
+function partitionThoughtSteps(steps: string[]): { planner: string[]; progress: string[] } {
+  const planner: string[] = [];
+  const progress: string[] = [];
+  for (const step of steps) {
+    if (isPlannerThoughtStep(step)) {
+      planner.push(step);
+      continue;
+    }
+    progress.push(step);
+  }
+  return {
+    planner: planner.slice(-5),
+    progress: progress.slice(-6),
+  };
+}
+
 export function MessageCard({
   message,
   onRegenerate,
   onRegenerateInDeep,
   onRetryWebOnly,
-  onOpenActivity,
   onReaction,
 }: MessageCardProps) {
   const [copied, setCopied] = useState(false);
   const [showCitations, setShowCitations] = useState(false);
+  const [showAllCitations, setShowAllCitations] = useState(false);
+  const [showThought, setShowThought] = useState(false);
   const copyResetTimerRef = useRef<number | null>(null);
   const isErrorMessage =
     message.role === "assistant" && message.content.trim().toLowerCase().startsWith("error:");
   const modeLabel = message.executionMode ? message.executionMode.toUpperCase() : "";
-  const citations = message.sourceUrls?.length ? message.sourceUrls : extractUrlsFromText(message.content);
   const { primary: primaryAnswer, sourcesBlock } = splitAnswerSections(message.content);
+  const citations = useMemo(() => {
+    return uniqueUrls([
+      ...(message.sourceUrls ?? []),
+      ...sourceUrlsFromBlock(sourcesBlock),
+      ...extractUrlsFromText(message.content),
+    ]);
+  }, [message.content, message.sourceUrls, sourcesBlock]);
+  const citationDomains = useMemo(() => {
+    return Array.from(new Set(citations.map((url) => displayWebsite(url)))).slice(0, 12);
+  }, [citations]);
+  const citationPreview = showAllCitations ? citations : citations.slice(0, 8);
+  const thoughtSteps = (message.reasoningSteps ?? [])
+    .map((step) => compactThoughtStep(step))
+    .filter((step) => Boolean(step))
+    .slice(-18);
+  const thoughtSites = (message.searchedWebsites ?? []).slice(0, 10);
+  const thoughtGroups = useMemo(() => partitionThoughtSteps(thoughtSteps), [thoughtSteps]);
+  const isStreamingThought = message.content.includes("Still working") || message.content.endsWith("▍");
+  const hasThoughtContent =
+    thoughtGroups.planner.length > 0 ||
+    thoughtGroups.progress.length > 0 ||
+    thoughtSites.length > 0;
 
   useEffect(() => {
     return () => {
@@ -86,6 +192,18 @@ export function MessageCard({
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (isStreamingThought) {
+      setShowThought(true);
+    }
+  }, [isStreamingThought]);
+
+  useEffect(() => {
+    if (!showCitations) {
+      setShowAllCitations(false);
+    }
+  }, [showCitations]);
 
   const handleCopy = async () => {
     const text = message.content.trim();
@@ -137,15 +255,78 @@ export function MessageCard({
 
           {message.role === "assistant" ? (
             <div className="mb-2 flex flex-wrap items-center gap-2 text-xs leading-4 text-slate-500 dark:text-slate-400">
-              <button
-                type="button"
-                onClick={() => onOpenActivity(message.id)}
-                className="inline-flex items-center gap-1 text-[15px] font-medium text-slate-700 hover:text-brand-blue dark:text-slate-200 dark:hover:text-blue-300"
-              >
-                <ActivityIcon className="h-4 w-4" />
-                {message.workedForLabel ? `Thought for ${message.workedForLabel}` : "Thought details"}{" "}
-                <span aria-hidden="true">›</span>
-              </button>
+              <div className="w-full">
+                <button
+                  type="button"
+                  onClick={() => setShowThought((prev) => !prev)}
+                  className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1.5 text-[13px] font-medium text-slate-700 transition hover:bg-blue-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                >
+                  <span
+                    className={`h-2 w-2 rounded-full ${
+                      isStreamingThought ? "animate-pulse bg-emerald-500" : "bg-slate-400 dark:bg-slate-500"
+                    }`}
+                  />
+                  {message.workedForLabel ? `Thought for ${message.workedForLabel}` : "Thought"}
+                  <span className="text-[11px]">{showThought ? "▲" : "▼"}</span>
+                </button>
+                {showThought ? (
+                  <div className="mt-2 rounded-xl border border-slate-200 bg-slate-50 p-3 text-[12px] text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200">
+                    {hasThoughtContent ? (
+                      <div className="space-y-3">
+                        {thoughtGroups.planner.length ? (
+                          <div>
+                            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                              Planner
+                            </p>
+                            <ul className="space-y-1">
+                              {thoughtGroups.planner.map((step) => (
+                                <li key={step} className="break-words text-slate-700 dark:text-slate-200">
+                                  {step}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+                        {thoughtGroups.progress.length ? (
+                          <div>
+                            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                              Progress
+                            </p>
+                            <ul className="space-y-1">
+                              {thoughtGroups.progress.map((step) => (
+                                <li key={step} className="break-words text-slate-700 dark:text-slate-200">
+                                  {step}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        ) : null}
+                        {thoughtSites.length ? (
+                          <div>
+                            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                              Sources Checked
+                            </p>
+                            <div className="flex flex-wrap gap-1.5">
+                              {thoughtSites.map((site) => (
+                                <code
+                                  key={site}
+                                  className="rounded-md border border-blue-100 bg-white px-1.5 py-0.5 text-[11px] text-brand-blue dark:border-slate-700 dark:bg-slate-950 dark:text-slate-200"
+                                >
+                                  {site}
+                                </code>
+                              ))}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <p className="text-slate-500 dark:text-slate-400">
+                        {isStreamingThought ? "Collecting planning steps..." : "No thought trace captured."}
+                      </p>
+                    )}
+                  </div>
+                ) : null}
+              </div>
               {compactPercent(message.trustConfidence) ? (
                 <span className="rounded-full border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:border-emerald-900/70 dark:bg-emerald-950/40 dark:text-emerald-200">
                   {compactPercent(message.trustConfidence)} confidence
@@ -169,6 +350,11 @@ export function MessageCard({
                 >
                   {showCitations ? "Hide" : "Show"} citations ({citations.length})
                 </button>
+              ) : null}
+              {citationDomains.length ? (
+                <span className="rounded-full border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-medium text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+                  {citationDomains.length} domains
+                </span>
               ) : null}
             </div>
           ) : null}
@@ -200,6 +386,16 @@ export function MessageCard({
                   ul: ({ children }) => <ul className="my-2 list-disc space-y-1 pl-6">{children}</ul>,
                   ol: ({ children }) => <ol className="my-2 list-decimal space-y-1 pl-6">{children}</ol>,
                   li: ({ children }) => <li>{children}</li>,
+                  a: ({ href, children }) => (
+                    <a
+                      href={href}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="break-all text-brand-blue underline decoration-blue-300 underline-offset-2 hover:text-blue-700 dark:text-blue-300 dark:decoration-blue-500 dark:hover:text-blue-200"
+                    >
+                      {children}
+                    </a>
+                  ),
                   hr: () => <hr className="my-5 border-blue-100 dark:border-slate-700" />,
                   code: ({ children }) => (
                     <code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[13px] text-slate-800 dark:bg-slate-800 dark:text-slate-100">
@@ -245,8 +441,8 @@ export function MessageCard({
               <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wide text-slate-600 dark:text-slate-300">
                 Supporting Evidence
               </p>
-              <div className="space-y-1.5">
-                {citations.slice(0, 6).map((url, index) => (
+              <div className="space-y-2">
+                {citationPreview.map((url, index) => (
                   <a
                     key={url}
                     href={url}
@@ -259,16 +455,26 @@ export function MessageCard({
                         [{index + 1}] {displayWebsite(url)}
                       </span>
                     </div>
-                    <span className="mt-0.5 block truncate text-[11px] text-brand-blue dark:text-blue-300">
-                      {compactUrlLabel(url)}
+                    <span className="mt-0.5 block break-all text-[11px] text-brand-blue dark:text-blue-300">
+                      {compactUrlPath(url)}
                     </span>
                   </a>
                 ))}
-                {citations.length > 6 ? (
-                  <p className="text-[10px] text-slate-500 dark:text-slate-400">+{citations.length - 6} more</p>
+                {citations.length > citationPreview.length ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllCitations((prev) => !prev)}
+                    className="text-[11px] font-medium text-brand-blue hover:underline dark:text-blue-300"
+                  >
+                    {showAllCitations
+                      ? "Show fewer citations"
+                      : `Show ${citations.length - citationPreview.length} more citations`}
+                  </button>
                 ) : null}
-                {sourcesBlock ? (
-                  <p className="text-[11px] text-slate-500 dark:text-slate-400">{sourcesBlock.slice(0, 180)}</p>
+                {sourcesBlock && !sourceUrlsFromBlock(sourcesBlock).length ? (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-2 text-[11px] text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{sourcesBlock}</ReactMarkdown>
+                  </div>
                 ) : null}
               </div>
             </section>

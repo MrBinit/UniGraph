@@ -46,7 +46,7 @@ _DEADLINE_HINT_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _REQUIREMENTS_HINT_RE = re.compile(
-    r"\b(requirement|eligibility|admission|documents|language)\b",
+    r"\b(requirements?|eligibility|admission|documents?)\b",
     flags=re.IGNORECASE,
 )
 _LANGUAGE_HINT_RE = re.compile(
@@ -78,6 +78,41 @@ _META_PUBLISHED_RE = [
 _TIME_TAG_RE = re.compile(r"<time[^>]+datetime\s*=\s*[\"']([^\"']+)[\"']", flags=re.IGNORECASE)
 _DATE_LIKE_RE = re.compile(
     r"\d{4}-\d{2}-\d{2}|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b",
+    flags=re.IGNORECASE,
+)
+_NUMERIC_TOKEN_RE = re.compile(r"\b\d+(?:[.,]\d+)?\b")
+_DEADLINE_CONTENT_RE = re.compile(
+    r"\b(application deadline|deadline|application period|apply by|closing date|bewerbungsfrist|frist)\b",
+    flags=re.IGNORECASE,
+)
+_DATE_VALUE_RE = re.compile(
+    r"\b\d{1,2}[./-]\d{1,2}(?:[./-]\d{2,4})?\b|\b\d{4}-\d{2}-\d{2}\b|"
+    r"\b(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|"
+    r"sep|sept|september|oct|october|nov|november|dec|december)\b",
+    flags=re.IGNORECASE,
+)
+_LANGUAGE_CONTENT_RE = re.compile(
+    r"\b(language requirement|english proficiency|proof of english|ielts|toefl|cefr|german)\b",
+    flags=re.IGNORECASE,
+)
+_LANGUAGE_SCORE_RE = re.compile(
+    r"\b(ielts|toefl|cefr|unicert|cambridge)\b.{0,25}\b\d",
+    flags=re.IGNORECASE,
+)
+_ADMISSION_CONTENT_RE = re.compile(
+    r"\b(admission requirements?|eligibility|entry requirements?|bachelor|qualifying degree|documents?)\b",
+    flags=re.IGNORECASE,
+)
+_DURATION_ECTS_CONTENT_RE = re.compile(
+    r"\b(ects|credit points?|cp|semester|semesters|duration|years?)\b",
+    flags=re.IGNORECASE,
+)
+_CURRICULUM_CONTENT_RE = re.compile(
+    r"\b(curriculum|course structure|study plan|modules?|regulations?|pruefungsordnung)\b",
+    flags=re.IGNORECASE,
+)
+_TUITION_CONTENT_RE = re.compile(
+    r"\b(tuition|fees|semester contribution|costs?)\b",
     flags=re.IGNORECASE,
 )
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", flags=re.DOTALL)
@@ -915,28 +950,119 @@ def _max_planner_subquestions() -> int:
     return max(0, int(getattr(settings.web_search, "query_planner_max_subquestions", 4)))
 
 
-def _coverage_subquestions_from_query(query: str) -> list[str]:
+def _required_fields_from_query(query: str) -> list[dict]:
     compact = " ".join(str(query or "").split()).strip().lower()
     if not compact:
         return []
+    field_catalog = {
+        "program_overview": {
+            "id": "program_overview",
+            "label": "program overview",
+            "subquestion": "program overview, degree type, department, and teaching language",
+            "query_focus": "official program overview degree language",
+        },
+        "admission_requirements": {
+            "id": "admission_requirements",
+            "label": "course requirements",
+            "subquestion": "course requirements, eligibility criteria, and required documents",
+            "query_focus": "admission requirements eligibility required documents",
+        },
+        "language_requirements": {
+            "id": "language_requirements",
+            "label": "language requirements",
+            "subquestion": "language requirements with accepted tests and minimum scores",
+            "query_focus": "language requirements IELTS TOEFL minimum score",
+        },
+        "application_deadline": {
+            "id": "application_deadline",
+            "label": "application deadlines",
+            "subquestion": "application deadline and intake timeline with exact dates",
+            "query_focus": "application deadline exact dates intake timeline",
+        },
+        "duration_ects": {
+            "id": "duration_ects",
+            "label": "duration and ECTS",
+            "subquestion": "program duration in semesters/years and total ECTS credits",
+            "query_focus": "program duration semesters years total ECTS credits",
+        },
+        "curriculum_modules": {
+            "id": "curriculum_modules",
+            "label": "curriculum and modules",
+            "subquestion": "curriculum structure and core modules from official regulations",
+            "query_focus": "curriculum structure core modules regulations",
+        },
+        "tuition_fees": {
+            "id": "tuition_fees",
+            "label": "tuition and fees",
+            "subquestion": "tuition fees and semester contribution amounts",
+            "query_focus": "tuition fees semester contribution costs",
+        },
+    }
+    selected_ids: list[str] = []
+    explicit_admission_scope = bool(
+        re.search(r"\b(admission|eligibility|entry|documents?|course requirements?)\b", compact)
+    )
+    language_only_requirements = bool(_LANGUAGE_HINT_RE.search(compact)) and not explicit_admission_scope
+    if _REQUIREMENTS_HINT_RE.search(compact) and not language_only_requirements:
+        selected_ids.append("admission_requirements")
+    if _LANGUAGE_HINT_RE.search(compact):
+        selected_ids.append("language_requirements")
+    if _DEADLINE_HINT_RE.search(compact) or "application" in compact:
+        selected_ids.append("application_deadline")
+    if _CURRICULUM_HINT_RE.search(compact) or "course" in compact:
+        selected_ids.append("curriculum_modules")
+    if _TUITION_HINT_RE.search(compact):
+        selected_ids.append("tuition_fees")
+    if re.search(r"\b(duration|ects|credit|semester|year)\b", compact):
+        selected_ids.append("duration_ects")
+
+    if re.search(r"\b(master|m\.sc|msc|program|course|study)\b", compact):
+        selected_ids.insert(0, "program_overview")
+
+    if not selected_ids:
+        if re.search(r"\b(master|m\.sc|msc|program|course|degree)\b", compact):
+            selected_ids = ["program_overview"]
+        else:
+            selected_ids = []
+
+    normalized: list[dict] = []
+    seen: set[str] = set()
+    for field_id in selected_ids:
+        if field_id in seen:
+            continue
+        seen.add(field_id)
+        field = field_catalog.get(field_id)
+        if field:
+            normalized.append(dict(field))
+    return normalized
+
+
+def _required_field_subquestions(required_fields: list[dict]) -> list[str]:
+    items = [str(field.get("subquestion", "")).strip() for field in required_fields]
+    return [item for item in items if item]
+
+
+def _coverage_subquestions_from_query(query: str) -> list[str]:
     candidates: list[str] = []
-    if _REQUIREMENTS_HINT_RE.search(compact):
+    required_fields = _required_fields_from_query(query)
+    candidates.extend(_required_field_subquestions(required_fields))
+    compact = " ".join(str(query or "").split()).strip().lower()
+    if not compact:
+        return _normalize_subquestion_list(candidates, limit=_max_planner_subquestions())
+    explicit_admission_scope = bool(
+        re.search(r"\b(admission|eligibility|entry|documents?|course requirements?)\b", compact)
+    )
+    language_only_requirements = bool(_LANGUAGE_HINT_RE.search(compact)) and not explicit_admission_scope
+    if _REQUIREMENTS_HINT_RE.search(compact) and not language_only_requirements:
         candidates.append("course requirements and eligibility criteria")
     if _LANGUAGE_HINT_RE.search(compact):
-        candidates.append("language requirements and accepted English test minimum scores")
+        candidates.append("language requirements and accepted English test minimum scores with exact numbers")
     if _DEADLINE_HINT_RE.search(compact):
-        candidates.append("application deadline and intake timeline")
+        candidates.append("application deadline and intake timeline with exact dates")
     if _CURRICULUM_HINT_RE.search(compact):
         candidates.append("curriculum structure and core modules")
     if _TUITION_HINT_RE.search(compact):
         candidates.append("tuition and semester fees")
-    if not candidates:
-        candidates.extend(
-            [
-                "program overview and duration",
-                "admission requirements",
-            ]
-        )
     return _normalize_subquestion_list(candidates, limit=_max_planner_subquestions())
 
 
@@ -944,8 +1070,15 @@ def _build_query_planner_messages(query: str, allowed_suffixes: list[str]) -> li
     max_queries = _max_planner_queries()
     max_subquestions = _max_planner_subquestions()
     suffix_clause = ", ".join(allowed_suffixes[:3]) if allowed_suffixes else "none"
+    required_fields = _required_fields_from_query(query)
     focus_subquestions = _coverage_subquestions_from_query(query)
     focus_text = "\n".join(f"- {item}" for item in focus_subquestions) or "- (none)"
+    required_field_text = (
+        "\n".join(
+            f"- {field.get('label', '')}: {field.get('query_focus', '')}" for field in required_fields
+        )
+        or "- (none)"
+    )
     system_prompt = (
         "You are a web search query planner for high-coverage deep retrieval. "
         "Think in phases: plan -> search fan-out -> evidence fan-in. "
@@ -957,6 +1090,8 @@ def _build_query_planner_messages(query: str, allowed_suffixes: list[str]) -> li
         f"User query: {query}\n"
         f"Allowed domain suffixes (optional): {suffix_clause}\n"
         f"Coverage dimensions to include when relevant:\n{focus_text}\n"
+        f"Required field-focused query intents:\n{required_field_text}\n"
+        "For fields asking deadlines/scores/duration, include dedicated exact-number/date queries.\n"
         "Prioritize official university pages and DAAD pages.\n"
         f"Return at most {max_queries} queries and at most {max_subquestions} subquestions."
     )
@@ -1322,6 +1457,105 @@ def _identify_missing_subquestions(subquestions: list[str], facts: list[dict]) -
             continue
         missing.append(subquestion)
     return missing
+
+
+def _candidate_evidence_text(candidate: dict) -> str:
+    if not isinstance(candidate, dict):
+        return ""
+    metadata = candidate.get("metadata")
+    metadata = metadata if isinstance(metadata, dict) else {}
+    parts = [
+        str(candidate.get("content", "")),
+        str(metadata.get("title", "")),
+        str(metadata.get("snippet", "")),
+    ]
+    return " ".join(part for part in parts if part).strip().lower()
+
+
+def _required_field_covered_by_text(field_id: str, text: str) -> bool:
+    compact = " ".join(str(text).split()).strip().lower()
+    if not compact:
+        return False
+    if field_id == "program_overview":
+        return bool(
+            re.search(r"\b(master|m\.sc|msc|program|programme|department|english)\b", compact)
+        )
+    if field_id == "admission_requirements":
+        return bool(_ADMISSION_CONTENT_RE.search(compact))
+    if field_id == "language_requirements":
+        return bool(
+            _LANGUAGE_CONTENT_RE.search(compact)
+            and (_LANGUAGE_SCORE_RE.search(compact) or _NUMERIC_TOKEN_RE.search(compact))
+        )
+    if field_id == "application_deadline":
+        return bool(_DEADLINE_CONTENT_RE.search(compact) and _DATE_VALUE_RE.search(compact))
+    if field_id == "duration_ects":
+        return bool(_DURATION_ECTS_CONTENT_RE.search(compact) and _NUMERIC_TOKEN_RE.search(compact))
+    if field_id == "curriculum_modules":
+        return bool(_CURRICULUM_CONTENT_RE.search(compact))
+    if field_id == "tuition_fees":
+        return bool(_TUITION_CONTENT_RE.search(compact) and _NUMERIC_TOKEN_RE.search(compact))
+    return False
+
+
+def _required_field_coverage(
+    required_fields: list[dict],
+    candidates: list[dict],
+) -> dict:
+    if not required_fields:
+        return {
+            "fields": [],
+            "missing_ids": [],
+            "missing_labels": [],
+            "missing_subquestions": [],
+            "coverage": 1.0,
+        }
+
+    evidence_texts = [_candidate_evidence_text(item) for item in candidates if isinstance(item, dict)]
+    statuses: list[dict] = []
+    missing_ids: list[str] = []
+    missing_labels: list[str] = []
+    missing_subquestions: list[str] = []
+
+    for field in required_fields:
+        field_id = str(field.get("id", "")).strip()
+        if not field_id:
+            continue
+        covered = any(_required_field_covered_by_text(field_id, text) for text in evidence_texts)
+        label = str(field.get("label", field_id)).strip() or field_id
+        statuses.append({"id": field_id, "label": label, "covered": covered})
+        if covered:
+            continue
+        missing_ids.append(field_id)
+        missing_labels.append(label)
+        subquestion = " ".join(str(field.get("subquestion", "")).split()).strip()
+        if subquestion:
+            missing_subquestions.append(subquestion)
+
+    total = len(statuses)
+    covered_count = len([item for item in statuses if item.get("covered")])
+    coverage = 1.0 if total <= 0 else (covered_count / total)
+    return {
+        "fields": statuses,
+        "missing_ids": missing_ids,
+        "missing_labels": missing_labels,
+        "missing_subquestions": _normalize_subquestion_list(
+            missing_subquestions,
+            limit=max(1, _max_planner_subquestions()),
+        ),
+        "coverage": max(0.0, min(1.0, coverage)),
+    }
+
+
+def _required_fields_by_ids(required_fields: list[dict], missing_ids: list[str]) -> list[dict]:
+    if not required_fields or not missing_ids:
+        return []
+    missing_set = {str(item).strip() for item in missing_ids if str(item).strip()}
+    return [
+        field
+        for field in required_fields
+        if str(field.get("id", "")).strip() in missing_set
+    ]
 
 
 def _build_gap_queries(query: str, missing_subquestions: list[str]) -> list[str]:
@@ -1728,7 +1962,8 @@ async def _asearch_payloads(query_variants: list[str], *, top_k: int) -> list[di
 
     search_depth = _search_depth_for_mode()
     num_results = _default_num_for_mode(top_k)
-    if len(query_variants) == 1:
+    multi_query_enabled = bool(getattr(settings.web_search, "multi_query_enabled", False))
+    if len(query_variants) == 1 and not multi_query_enabled:
         payload = await asearch_google(
             query_variants[0],
             gl=settings.web_search.default_gl,
@@ -1997,9 +2232,34 @@ def _fact_text_from_content(content: str) -> str:
     text = " ".join(str(content or "").split()).strip()
     if not text:
         return ""
-    sentence = _SENTENCE_SPLIT_RE.split(text)[0].strip()
-    if not sentence:
-        sentence = text
+    sentences = [item.strip() for item in _SENTENCE_SPLIT_RE.split(text) if item.strip()]
+    if not sentences:
+        sentences = [text]
+
+    def _score(sentence: str) -> float:
+        score = 0.0
+        lowered = sentence.lower()
+        if _NUMERIC_TOKEN_RE.search(lowered):
+            score += 0.9
+        if _DATE_VALUE_RE.search(lowered):
+            score += 0.7
+        if _DEADLINE_CONTENT_RE.search(lowered):
+            score += 0.9
+        if _LANGUAGE_CONTENT_RE.search(lowered):
+            score += 0.8
+        if _DURATION_ECTS_CONTENT_RE.search(lowered):
+            score += 0.8
+        if _ADMISSION_CONTENT_RE.search(lowered):
+            score += 0.7
+        if _CURRICULUM_CONTENT_RE.search(lowered):
+            score += 0.5
+        if _TUITION_CONTENT_RE.search(lowered):
+            score += 0.6
+        if len(sentence) < 25:
+            score -= 0.3
+        return score
+
+    sentence = max(sentences[:8], key=_score)
     return sentence[:280].strip()
 
 
@@ -2120,20 +2380,76 @@ def _combine_missing_subquestions(base_missing: list[str], unique_domains: list[
     )
 
 
+def _build_required_field_queries(
+    query: str,
+    *,
+    missing_required_fields: list[dict],
+    allowed_suffixes: list[str],
+    unique_domains: list[str],
+) -> list[str]:
+    if not missing_required_fields:
+        return []
+
+    candidates: list[str] = []
+    seen_domains = {
+        _domain_group_key(str(host).strip().lower())
+        for host in unique_domains
+        if str(host).strip()
+    }
+    seen_domains.discard("")
+
+    official_domains = _official_domains_for_query(query)[:3]
+    suffix_scope = ""
+    if allowed_suffixes:
+        suffix_scope = " (" + " OR ".join(f"site:{suffix}" for suffix in allowed_suffixes[:2]) + ")"
+
+    for field in missing_required_fields:
+        focus = " ".join(str(field.get("query_focus", "")).split()).strip()
+        if not focus:
+            continue
+        candidates.append(f"{query} {focus} official source")
+        if suffix_scope:
+            candidates.append(f"{query} {focus}{suffix_scope}")
+        for domain in official_domains:
+            grouped = _domain_group_key(domain)
+            if grouped in seen_domains:
+                continue
+            candidates.append(f"{query} {focus} site:{domain}")
+
+    max_gap_queries = max(1, int(getattr(settings.web_search, "retrieval_loop_max_gap_queries", 2)))
+    return _normalize_query_list(
+        candidates,
+        limit=max_gap_queries * 3,
+    )
+
+
 def _build_follow_up_queries(
     query: str,
     *,
     missing_subquestions: list[str],
     llm_gap_queries: list[str],
+    missing_required_fields: list[dict],
+    allowed_suffixes: list[str],
     unique_domains: list[str],
 ) -> list[str]:
-    if llm_gap_queries:
-        return llm_gap_queries
+    max_gap_queries = max(1, int(getattr(settings.web_search, "retrieval_loop_max_gap_queries", 2)))
+    candidate_limit = max_gap_queries * 4
+    required_field_queries = _build_required_field_queries(
+        query,
+        missing_required_fields=missing_required_fields,
+        allowed_suffixes=allowed_suffixes,
+        unique_domains=unique_domains,
+    )
     heuristic_queries = _build_gap_queries(query, missing_subquestions)
     domain_queries = _build_domain_gap_queries(query, unique_domains)
+    if llm_gap_queries:
+        return _normalize_query_list(
+            required_field_queries + llm_gap_queries + domain_queries,
+            limit=candidate_limit,
+        )
     return _normalize_query_list(
-        heuristic_queries + domain_queries,
-        limit=max(1, int(getattr(settings.web_search, "retrieval_loop_max_gap_queries", 2))),
+        required_field_queries + heuristic_queries + domain_queries,
+        limit=candidate_limit,
     )
 
 
@@ -2214,6 +2530,7 @@ async def _aretrieve_web_chunks_impl(
     allowed_suffixes = _normalized_allowed_domain_suffixes()
     normalized_mode = _normalized_search_mode(search_mode)
     deep_mode = _is_deep_search_mode(normalized_mode)
+    required_fields = _required_fields_from_query(query) if deep_mode else []
     if deep_mode:
         query_plan = await _resolve_query_plan(query, allowed_suffixes)
     else:
@@ -2229,6 +2546,7 @@ async def _aretrieve_web_chunks_impl(
             "planner": str(query_plan.get("planner", "heuristic")),
             "llm_used": bool(query_plan.get("llm_used", False)),
             "subquestions": query_plan.get("subquestions", []),
+            "required_fields": [str(field.get("id", "")).strip() for field in required_fields],
             "queries": query_plan.get("queries", []),
         },
     )
@@ -2254,7 +2572,6 @@ async def _aretrieve_web_chunks_impl(
     seen_queries: set[str] = set()
     executed_queries: list[str] = []
     loop_llm_used = False
-
     max_steps = max(1, int(getattr(settings.web_search, "retrieval_loop_max_steps", 2)))
     if not deep_mode or not _retrieval_loop_enabled():
         max_steps = 1
@@ -2262,12 +2579,22 @@ async def _aretrieve_web_chunks_impl(
     for step in range(1, max_steps + 1):
         current_domains = _unique_domains_from_candidates(all_candidates)
         heuristic_missing = _identify_missing_subquestions(subquestions, all_facts)
-        missing_subquestions = _combine_missing_subquestions(heuristic_missing, current_domains)
+        required_status = _required_field_coverage(required_fields, all_candidates)
+        missing_required_fields = _required_fields_by_ids(
+            required_fields,
+            required_status.get("missing_ids", []),
+        )
+        missing_subquestions = _combine_missing_subquestions(
+            list(heuristic_missing) + list(required_status.get("missing_subquestions", [])),
+            current_domains,
+        )
         llm_gap_queries: list[str] = []
         follow_up_queries = _build_follow_up_queries(
             query,
             missing_subquestions=missing_subquestions,
             llm_gap_queries=llm_gap_queries,
+            missing_required_fields=missing_required_fields,
+            allowed_suffixes=allowed_suffixes,
             unique_domains=current_domains,
         )
         if deep_mode and step > 1 and missing_subquestions:
@@ -2280,7 +2607,8 @@ async def _aretrieve_web_chunks_impl(
             if llm_gap_plan:
                 loop_llm_used = True
                 missing_subquestions = _normalize_subquestion_list(
-                    llm_gap_plan.get("missing_subquestions", []),
+                    list(llm_gap_plan.get("missing_subquestions", []))
+                    + list(required_status.get("missing_subquestions", [])),
                     limit=max(_max_planner_subquestions(), _retrieval_min_unique_domains() + 2),
                 ) or list(missing_subquestions)
                 llm_gap_queries = _normalize_query_list(
@@ -2293,6 +2621,8 @@ async def _aretrieve_web_chunks_impl(
                     query,
                     missing_subquestions=missing_subquestions,
                     llm_gap_queries=llm_gap_queries,
+                    missing_required_fields=missing_required_fields,
+                    allowed_suffixes=allowed_suffixes,
                     unique_domains=current_domains,
                 )
 
@@ -2300,7 +2630,22 @@ async def _aretrieve_web_chunks_impl(
             base_query=query,
             initial_queries=planned_queries,
             first_wave_queries=(
-                _build_gap_queries(query, subquestions) if deep_mode else []
+                _normalize_query_list(
+                    _build_gap_queries(query, subquestions)
+                    + _build_required_field_queries(
+                        query,
+                        missing_required_fields=required_fields,
+                        allowed_suffixes=allowed_suffixes,
+                        unique_domains=current_domains,
+                    ),
+                    limit=max(
+                        _max_planner_queries(),
+                        _max_planner_queries()
+                        + max(1, int(getattr(settings.web_search, "retrieval_loop_max_gap_queries", 2))),
+                    ),
+                )
+                if deep_mode and bool(getattr(settings.web_search, "multi_query_enabled", False))
+                else []
             ),
             missing_subquestions=missing_subquestions,
             llm_gap_queries=llm_gap_queries,
@@ -2389,14 +2734,30 @@ async def _aretrieve_web_chunks_impl(
 
         unique_domains = _unique_domains_from_candidates(all_candidates)
         next_heuristic_missing = _identify_missing_subquestions(subquestions, all_facts)
-        next_missing = _combine_missing_subquestions(next_heuristic_missing, unique_domains)
+        next_required_status = _required_field_coverage(required_fields, all_candidates)
+        next_missing_required_ids = list(next_required_status.get("missing_ids", []))
+        next_missing_required_fields = _required_fields_by_ids(required_fields, next_missing_required_ids)
+        next_missing = _combine_missing_subquestions(
+            list(next_heuristic_missing) + list(next_required_status.get("missing_subquestions", [])),
+            unique_domains,
+        )
         next_follow_up_queries = _build_follow_up_queries(
             query,
             missing_subquestions=next_missing,
             llm_gap_queries=llm_gap_queries,
+            missing_required_fields=next_missing_required_fields,
+            allowed_suffixes=allowed_suffixes,
             unique_domains=unique_domains,
         )
-        retrieval_verified = (not next_missing) if deep_mode else True
+        retrieval_verified = (
+            (
+                len(unique_domains) >= _retrieval_min_unique_domains()
+                and not next_missing
+                and not next_missing_required_ids
+            )
+            if deep_mode
+            else True
+        )
         emit_trace_event(
             "retrieval_verification",
             {
@@ -2407,6 +2768,11 @@ async def _aretrieve_web_chunks_impl(
                 "unique_domain_count": len(unique_domains),
                 "unique_domains": unique_domains[:8],
                 "missing_subquestions": next_missing,
+                "required_field_coverage": round(
+                    float(next_required_status.get("coverage", 1.0) or 0.0),
+                    4,
+                ),
+                "required_fields_missing": next_missing_required_ids,
             },
         )
         gap_iterations.append(
@@ -2416,6 +2782,11 @@ async def _aretrieve_web_chunks_impl(
                 "llm_gap_queries": llm_gap_queries,
                 "follow_up_queries": next_follow_up_queries,
                 "missing_subquestions": next_missing,
+                "required_field_coverage": round(
+                    float(next_required_status.get("coverage", 1.0) or 0.0),
+                    4,
+                ),
+                "required_fields_missing": next_missing_required_ids,
                 "unique_domains": unique_domains,
                 "unique_domain_count": len(unique_domains),
             }
@@ -2437,6 +2808,22 @@ async def _aretrieve_web_chunks_impl(
         limit=_max_context_results_for_mode(),
     )
     final_domains = _unique_domains_from_candidates(results)
+    final_required_field_status = _required_field_coverage(required_fields, results)
+    final_missing_subquestions = _combine_missing_subquestions(
+        list(_identify_missing_subquestions(subquestions, extracted_facts))
+        + list(final_required_field_status.get("missing_subquestions", [])),
+        final_domains,
+    )
+    final_missing_required_ids = list(final_required_field_status.get("missing_ids", []))
+    final_verified = (
+        (
+            len(final_domains) >= _retrieval_min_unique_domains()
+            and not final_missing_subquestions
+            and not final_missing_required_ids
+        )
+        if deep_mode
+        else bool(results)
+    )
     emit_trace_event(
         "source_ranking_completed",
         {
@@ -2444,6 +2831,11 @@ async def _aretrieve_web_chunks_impl(
             "facts": extracted_facts,
             "unique_domain_count": len(final_domains),
             "unique_domains": final_domains[:8],
+            "required_field_coverage": round(
+                float(final_required_field_status.get("coverage", 1.0) or 0.0),
+                4,
+            ),
+            "required_fields_missing": final_missing_required_ids,
             "urls": [
                 str((item.get("metadata") or {}).get("url", "")).strip()
                 for item in results[:8]
@@ -2460,6 +2852,7 @@ async def _aretrieve_web_chunks_impl(
             "planner": str(query_plan.get("planner", "heuristic")),
             "llm_used": bool(query_plan.get("llm_used", False)),
             "subquestions": subquestions,
+            "required_fields": [str(field.get("id", "")).strip() for field in required_fields],
         },
         "retrieval_loop": {
             "enabled": bool(deep_mode and _retrieval_loop_enabled()),
@@ -2471,14 +2864,15 @@ async def _aretrieve_web_chunks_impl(
             "min_unique_domains": _retrieval_min_unique_domains(),
             "unique_domains": final_domains,
             "unique_domain_count": len(final_domains),
-            "verified": (
-                (
-                    len(final_domains) >= _retrieval_min_unique_domains()
-                    and not _identify_missing_subquestions(subquestions, extracted_facts)
-                )
-                if deep_mode
-                else bool(results)
+            "missing_subquestions": final_missing_subquestions,
+            "required_field_coverage": round(
+                float(final_required_field_status.get("coverage", 1.0) or 0.0),
+                4,
             ),
+            "required_fields": final_required_field_status.get("fields", []),
+            "required_fields_missing": final_missing_required_ids,
+            "required_field_labels_missing": final_required_field_status.get("missing_labels", []),
+            "verified": final_verified,
         },
         "facts": extracted_facts,
         "retrieval_strategy": (
