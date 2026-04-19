@@ -13,9 +13,12 @@ class TavilyConfig(BaseModel):
     default_hl: str = "en"
     default_num: int = Field(default=10, ge=1, le=100)
     timeout_seconds: float = Field(default=25.0, ge=1.0, le=120.0)
+    fast_timeout_seconds: float = Field(default=0.0, ge=0.0, le=120.0)
+    deep_timeout_seconds: float = Field(default=0.0, ge=0.0, le=300.0)
     max_concurrency: int = Field(default=8, ge=1, le=256)
     queue_workers: int = Field(default=4, ge=1, le=256)
     queue_max_size: int = Field(default=200, ge=1, le=100000)
+    response_cache_enabled: bool = True
     always_web_retrieval_enabled: bool = True
     retrieval_fanout_enabled: bool = True
     fallback_enabled: bool = True
@@ -37,6 +40,14 @@ class TavilyConfig(BaseModel):
     retrieval_loop_cache_ttl_seconds: int = Field(default=300, ge=0, le=86400)
     retrieval_loop_max_steps: int = Field(default=2, ge=1, le=5)
     retrieval_loop_max_gap_queries: int = Field(default=3, ge=1, le=8)
+    deep_required_field_rescue_enabled: bool = True
+    deep_required_field_rescue_max_queries: int = Field(default=6, ge=1, le=12)
+    agentic_required_field_rescue_max_rounds: int = Field(default=2, ge=0, le=3)
+    deep_internal_crawl_enabled: bool = True
+    deep_internal_crawl_max_depth: int = Field(default=2, ge=1, le=4)
+    deep_internal_crawl_max_pages: int = Field(default=10, ge=1, le=30)
+    deep_internal_crawl_links_per_page: int = Field(default=10, ge=1, le=30)
+    deep_internal_crawl_per_parent_limit: int = Field(default=4, ge=1, le=12)
     retrieval_min_unique_domains: int = Field(default=2, ge=1, le=8)
     deep_min_unique_domains: int = Field(default=2, ge=1, le=8)
     retrieval_gap_min_token_coverage: float = Field(default=0.5, ge=0.0, le=1.0)
@@ -67,6 +78,8 @@ class TavilyConfig(BaseModel):
     trust_recency_weight: float = Field(default=0.1, ge=0.0, le=1.0)
     trust_agreement_weight: float = Field(default=0.1, ge=0.0, le=1.0)
     deep_cache_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
+    deep_answer_min_confidence: float = Field(default=0.72, ge=0.0, le=1.0)
+    deep_required_field_min_coverage: float = Field(default=0.85, ge=0.5, le=1.0)
     deep_cache_min_required_field_coverage: float = Field(default=0.85, ge=0.0, le=1.0)
     deep_cache_min_source_count: int = Field(default=2, ge=1, le=20)
     cache_max_not_verified_mentions: int = Field(default=3, ge=1, le=20)

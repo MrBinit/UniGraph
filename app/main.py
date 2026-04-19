@@ -16,8 +16,6 @@ from app.middlewares.rate_limit import RateLimitMiddleware
 from app.middlewares.request_logging import RequestLoggingMiddleware
 from app.middlewares.route_matching import RouteMatchingMiddleware
 from app.middlewares.timeout import TimeoutMiddleware
-from app.infra.postgres_client import get_postgres_pool
-from app.repositories.auth_user_repository import ensure_auth_user_table
 from app.infra.redis_client import app_redis_client
 from app.services.offline_evaluation_service import (
     start_offline_eval_scheduler,
@@ -49,27 +47,11 @@ def _warm_redis_backend():
         logger.warning("StartupWarmup | redis=failed | error=%s", exc)
 
 
-def _warm_postgres_backend():
-    """Warm Postgres connectivity when enabled."""
-    if not settings.postgres.enabled:
-        return
-    try:
-        pool = get_postgres_pool()
-        with pool.connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT 1")
-        ensure_auth_user_table()
-        logger.info("StartupWarmup | postgres=ok")
-    except Exception as exc:
-        logger.warning("StartupWarmup | postgres=failed | error=%s", exc)
-
-
 def _register_lifecycle_handlers(app: FastAPI):
     """Register startup/shutdown handlers."""
 
     def warm_backends():
         _warm_redis_backend()
-        _warm_postgres_backend()
         start_offline_eval_scheduler()
 
     async def stop_background_jobs():

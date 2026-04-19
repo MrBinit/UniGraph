@@ -44,6 +44,12 @@ async def get_eval_conversations(
     conversations = []
     for trace in traces:
         metrics = evaluate_trace(trace)
+        retrieved_results = trace.get("retrieved_results", [])
+        retrieved_results = retrieved_results if isinstance(retrieved_results, list) else []
+        retrieved_count = int(
+            trace.get("retrieval_result_count", len(retrieved_results))
+            or 0
+        )
         conversations.append(
             {
                 "conversation_id": trace.get("conversation_id", ""),
@@ -51,7 +57,7 @@ async def get_eval_conversations(
                 "prompt": trace.get("prompt", ""),
                 "answer": trace.get("answer", ""),
                 "retrieval_strategy": trace.get("retrieval_strategy", ""),
-                "retrieved_count": len(trace.get("retrieved_results", [])),
+                "retrieved_count": max(0, retrieved_count),
                 "labels": trace.get("labels", {}),
                 "metrics": metrics,
             }
@@ -89,6 +95,12 @@ async def label_eval_conversation(
         )
 
     metrics = evaluate_trace(trace)
+    retrieved_results = trace.get("retrieved_results", [])
+    retrieved_results = retrieved_results if isinstance(retrieved_results, list) else []
+    retrieved_count = int(
+        trace.get("retrieval_result_count", len(retrieved_results))
+        or 0
+    )
     return {
         "conversation": {
             "conversation_id": trace.get("conversation_id", ""),
@@ -96,7 +108,7 @@ async def label_eval_conversation(
             "prompt": trace.get("prompt", ""),
             "answer": trace.get("answer", ""),
             "retrieval_strategy": trace.get("retrieval_strategy", ""),
-            "retrieved_count": len(trace.get("retrieved_results", [])),
+            "retrieved_count": max(0, retrieved_count),
             "labels": trace.get("labels", {}),
             "metrics": metrics,
         }

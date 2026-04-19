@@ -1,10 +1,10 @@
 postgres:
-  enabled: true
-  host: "unigraph.cwjweimqmbri.us-east-1.rds.amazonaws.com"
+  enabled: false
+  host: "localhost"
   port: 5432
-  database: "unigraph"
-  username: "unigraph"
-  ssl_mode: "require"
+  database: "postgres"
+  username: "postgres"
+  ssl_mode: "disable"
   min_pool_size: 1
   max_pool_size: 10
   connect_timeout_seconds: 10

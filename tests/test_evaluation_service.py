@@ -123,3 +123,43 @@ def test_report_includes_web_fallback_quality_and_feedback():
     assert web_metrics["avg_citation_accuracy"] == 1.0
     assert web_metrics["feedback_count"] == 1
     assert web_metrics["positive_feedback_rate"] == 1.0
+
+
+def test_list_chat_traces_falls_back_to_dynamodb_when_redis_unavailable(monkeypatch):
+    class BrokenRedis:
+        def lrange(self, *_args, **_kwargs):
+            raise TimeoutError("redis unavailable")
+
+    class FakeDynamoClient:
+        def scan(self, **_kwargs):
+            return {
+                "Items": [
+                    {
+                        "request_id": {"S": "req-1"},
+                        "timestamp": {"S": "2026-04-19T10:30:00+00:00"},
+                        "user_id": {"S": "user-ddb"},
+                        "query": {"S": "Show prior conversation"},
+                        "answer": {"S": "Loaded from DynamoDB fallback."},
+                        "retrieval_strategy": {"S": "web_fallback_reranked"},
+                        "retrieval_result_count": {"N": "3"},
+                        "groundedness": {"N": "0.92"},
+                        "citation_accuracy": {"N": "1.0"},
+                        "outcome": {"S": "success"},
+                    }
+                ]
+            }
+
+    monkeypatch.setattr(evaluation_service, "redis_client", BrokenRedis())
+    monkeypatch.setattr(evaluation_service, "_dynamodb_client", lambda: FakeDynamoClient())
+    monkeypatch.setattr(evaluation_service.settings.app, "metrics_dynamodb_enabled", True)
+    monkeypatch.setattr(
+        evaluation_service.settings.app, "metrics_dynamodb_requests_table", "req-table"
+    )
+
+    traces = evaluation_service.list_chat_traces("user-ddb", limit=5)
+    assert len(traces) == 1
+    assert traces[0]["conversation_id"] == "req-1"
+    assert traces[0]["prompt"] == "Show prior conversation"
+    assert traces[0]["answer"] == "Loaded from DynamoDB fallback."
+    assert traces[0]["retrieval_result_count"] == 3
+    assert traces[0]["_trace_source"] == "dynamodb_metrics"

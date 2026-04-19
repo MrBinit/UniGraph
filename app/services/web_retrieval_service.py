@@ -7,10 +7,11 @@ import json
 import logging
 import re
 import time
+import unicodedata
 import urllib.request
 from datetime import datetime, timezone
 from html import unescape
-from urllib.parse import urlparse
+from urllib.parse import urldefrag, urljoin, urlparse
 
 from app.core.config import get_settings
 from app.infra.io_limiters import DependencyBackpressureError, dependency_limiter
@@ -38,6 +39,10 @@ _BLOCK_BREAK_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _TAG_RE = re.compile(r"<[^>]+>")
+_ANCHOR_TAG_RE = re.compile(
+    r"<a\b[^>]*href\s*=\s*[\"']([^\"']+)[\"'][^>]*>(.*?)</a>",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 _WHITESPACE_RE = re.compile(r"\s+")
 _QUERY_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
@@ -46,7 +51,7 @@ _DEADLINE_HINT_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _REQUIREMENTS_HINT_RE = re.compile(
-    r"\b(requirements?|eligibility|admission|documents?)\b",
+    r"\b(requirements?|eligibility|admission requirements?|documents?)\b",
     flags=re.IGNORECASE,
 )
 _LANGUAGE_HINT_RE = re.compile(
@@ -59,6 +64,11 @@ _CURRICULUM_HINT_RE = re.compile(
 )
 _TUITION_HINT_RE = re.compile(
     r"\b(tuition|fees|semester contribution|cost)\b",
+    flags=re.IGNORECASE,
+)
+_PORTAL_HINT_RE = re.compile(
+    r"\b(portal|application portal|online application|apply online|bewerbungsportal|"
+    r"where (?:can i|to) apply|how to apply|where can i apply)\b",
     flags=re.IGNORECASE,
 )
 _META_PUBLISHED_RE = [
@@ -103,6 +113,10 @@ _ADMISSION_CONTENT_RE = re.compile(
     r"\b(admission requirements?|eligibility|entry requirements?|bachelor|qualifying degree|documents?)\b",
     flags=re.IGNORECASE,
 )
+_GPA_CONTENT_RE = re.compile(
+    r"\b(gpa|grade point|minimum grade|cgpa|grade average|grade threshold)\b",
+    flags=re.IGNORECASE,
+)
 _DURATION_ECTS_CONTENT_RE = re.compile(
     r"\b(ects|credit points?|cp|semester|semesters|duration|years?)\b",
     flags=re.IGNORECASE,
@@ -113,6 +127,11 @@ _CURRICULUM_CONTENT_RE = re.compile(
 )
 _TUITION_CONTENT_RE = re.compile(
     r"\b(tuition|fees|semester contribution|costs?)\b",
+    flags=re.IGNORECASE,
+)
+_PORTAL_CONTENT_RE = re.compile(
+    r"\b(application portal|online application|apply online|bewerbungsportal|application system|"
+    r"where to apply|how to apply|apply via)\b",
     flags=re.IGNORECASE,
 )
 _JSON_OBJECT_RE = re.compile(r"\{.*\}", flags=re.DOTALL)
@@ -193,6 +212,7 @@ _NON_OFFICIAL_HOST_MARKERS = (
     "blog",
     "forum",
     "wiki",
+    "guide",
     "ranking",
     "rankings",
     "portal",
@@ -200,8 +220,90 @@ _NON_OFFICIAL_HOST_MARKERS = (
     "listing",
     "review",
     "consult",
+    "news",
+    "magazine",
+    "substack",
+    "medium",
+    "reddit",
+    "quora",
+    "linkedin",
+    "wikipedia",
     "newsroom",
 )
+_ACRONYM_LIKE_HOST_BLOCKLIST = {"daad", "dfg", "dlr"}
+_DOMAIN_INFERENCE_STOPWORDS = {
+    "msc",
+    "m.sc",
+    "master",
+    "masters",
+    "program",
+    "programme",
+    "course",
+    "requirements",
+    "admission",
+    "deadline",
+    "application",
+    "language",
+    "ielts",
+    "toefl",
+}
+_DOMAIN_SLUG_TOKEN_ALIASES = {
+    "tubingen": "tuebingen",
+    "munchen": "muenchen",
+    "koln": "koeln",
+    "dusseldorf": "duesseldorf",
+    "wurzburg": "wuerzburg",
+    "nurnberg": "nuernberg",
+}
+_KNOWN_QUERY_PHRASE_DOMAIN_HINTS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("technical university of munich", ("tum.de",)),
+    ("technische universitat munchen", ("tum.de",)),
+    ("technische universitaet muenchen", ("tum.de",)),
+    ("tum munich", ("tum.de",)),
+)
+_ADMISSIONS_HIGH_PRECISION_FIELD_IDS = {
+    "admission_requirements",
+    "gpa_threshold",
+    "ects_breakdown",
+    "language_requirements",
+    "language_score_thresholds",
+    "application_deadline",
+}
+_CRAWL_PRIORITY_MARKERS = (
+    "admission",
+    "apply",
+    "application",
+    "deadline",
+    "eligibility",
+    "requirements",
+    "language",
+    "ielts",
+    "toefl",
+    "portal",
+    "regulation",
+    "regulations",
+    "module",
+    "curriculum",
+    "tuition",
+    "fees",
+    "bewerbung",
+    "zulassung",
+    "frist",
+    "pruefungsordnung",
+    "studienordnung",
+)
+_REQUIRED_FIELD_CRAWL_HINTS: dict[str, tuple[str, ...]] = {
+    "admission_requirements": ("admission", "requirements", "eligibility", "prerequisite"),
+    "gpa_threshold": ("gpa", "grade", "minimum grade", "score"),
+    "ects_breakdown": ("ects", "credits", "credit points", "prerequisite"),
+    "language_requirements": ("language", "english", "german", "ielts", "toefl"),
+    "language_score_thresholds": ("ielts", "toefl", "cefr", "minimum score"),
+    "application_deadline": ("deadline", "application period", "frist", "apply by"),
+    "application_portal": ("apply online", "application portal", "bewerbungsportal", "portal"),
+    "duration_ects": ("duration", "semesters", "ects"),
+    "curriculum_modules": ("curriculum", "modules", "study plan", "regulations"),
+    "tuition_fees": ("fees", "tuition", "semester contribution"),
+}
 _PLANNER_CACHE_VERSION = "v2"
 _RETRIEVAL_MODE_CTX: contextvars.ContextVar[str] = contextvars.ContextVar(
     "web_retrieval_mode",
@@ -362,6 +464,12 @@ def _official_domains_for_query(query: str) -> list[str]:
             continue
         seen.add(normalized)
         domains.append(normalized)
+    inferred = _inferred_official_domains_from_query(text)
+    for domain in inferred:
+        if domain in seen:
+            continue
+        seen.add(domain)
+        domains.append(domain)
     return domains
 
 
@@ -409,6 +517,98 @@ def _domain_group_key(host: str) -> str:
     if len(parts) <= 2:
         return normalized
     return ".".join(parts[-2:])
+
+
+def _replace_german_chars_for_domain(text: str) -> str:
+    value = str(text or "").lower()
+    return (
+        value.replace("ä", "ae")
+        .replace("ö", "oe")
+        .replace("ü", "ue")
+        .replace("ß", "ss")
+    )
+
+
+def _ascii_domain_slug(text: str) -> str:
+    value = _replace_german_chars_for_domain(text)
+    value = unicodedata.normalize("NFKD", value)
+    value = value.encode("ascii", "ignore").decode("ascii")
+    value = re.sub(r"[^a-z0-9]+", "-", value).strip("-")
+    value = re.sub(r"-{2,}", "-", value)
+    return value
+
+
+def _inferred_official_domains_from_query(text: str) -> list[str]:
+    compact = " ".join(str(text or "").split()).strip().lower()
+    if not compact:
+        return []
+    normalized_compact = _replace_german_chars_for_domain(compact)
+    domains: list[str] = []
+    seen: set[str] = set()
+
+    def _push(domain: str) -> None:
+        candidate = str(domain or "").strip().lower()
+        if not candidate or candidate in seen:
+            return
+        if not re.fullmatch(r"[a-z0-9-]+\.(?:de|eu)", candidate):
+            return
+        seen.add(candidate)
+        domains.append(candidate)
+
+    known_acronym_domains = {
+        "fau": ("fau.de", "fau.eu"),
+        "tum": ("tum.de",),
+        "lmu": ("lmu.de",),
+        "rwth": ("rwth-aachen.de",),
+    }
+    tokens = [token for token in re.findall(r"[a-z0-9-]{2,}", compact) if token]
+    for token in tokens:
+        for domain in known_acronym_domains.get(token, ()):
+            _push(domain)
+    for phrase, phrase_domains in _KNOWN_QUERY_PHRASE_DOMAIN_HINTS:
+        if phrase in normalized_compact:
+            for domain in phrase_domains:
+                _push(domain)
+
+    pattern = re.compile(
+        r"\b(?:university|universit[a-z]*|uni|tu|th|fh)\s+(?:of\s+)?"
+        r"([a-z0-9äöüß\-]+(?:\s+[a-z0-9äöüß\-]+){0,2})",
+        re.IGNORECASE,
+    )
+    for match in pattern.finditer(compact):
+        raw_name = " ".join(str(match.group(1) or "").split()).strip()
+        if not raw_name:
+            continue
+        filtered_tokens: list[str] = []
+        for token in re.findall(r"[a-z0-9äöüß-]+", raw_name.lower()):
+            if token in _DOMAIN_INFERENCE_STOPWORDS:
+                break
+            filtered_tokens.append(token)
+        raw_name = " ".join(filtered_tokens).strip()
+        if not raw_name:
+            continue
+        slug = _ascii_domain_slug(raw_name)
+        if not slug:
+            continue
+        slug_candidates = [slug]
+        alias_tokens = [
+            _DOMAIN_SLUG_TOKEN_ALIASES.get(token, token) for token in slug.split("-") if token
+        ]
+        alias_slug = "-".join(alias_tokens).strip("-")
+        if alias_slug and alias_slug != slug:
+            slug_candidates.append(alias_slug)
+        for slug_candidate in slug_candidates:
+            _push(f"uni-{slug_candidate}.de")
+            _push(f"tu-{slug_candidate}.de")
+    if (
+        "tum.de" in seen
+        and any(phrase in normalized_compact for phrase, _ in _KNOWN_QUERY_PHRASE_DOMAIN_HINTS)
+    ):
+        for conflict_domain in ("uni-munich.de", "uni-muenchen.de", "lmu.de"):
+            if conflict_domain in seen:
+                seen.remove(conflict_domain)
+                domains = [item for item in domains if item != conflict_domain]
+    return domains
 
 
 async def _read_cache_json(cache_key: str) -> dict | None:
@@ -508,6 +708,135 @@ def _clean_plain_text(raw_text: str, max_chars: int) -> str:
     return "\n".join(lines)[:max_chars]
 
 
+def _internal_crawl_enabled() -> bool:
+    return _is_deep_search_mode() and bool(
+        getattr(settings.web_search, "deep_internal_crawl_enabled", True)
+    )
+
+
+def _internal_crawl_max_depth() -> int:
+    configured = int(getattr(settings.web_search, "deep_internal_crawl_max_depth", 2) or 2)
+    return max(1, min(4, configured))
+
+
+def _internal_crawl_max_pages() -> int:
+    configured = int(getattr(settings.web_search, "deep_internal_crawl_max_pages", 10) or 10)
+    return max(1, min(30, configured))
+
+
+def _internal_crawl_links_per_page() -> int:
+    configured = int(getattr(settings.web_search, "deep_internal_crawl_links_per_page", 10) or 10)
+    return max(1, min(30, configured))
+
+
+def _internal_crawl_per_parent_limit() -> int:
+    configured = int(getattr(settings.web_search, "deep_internal_crawl_per_parent_limit", 4) or 4)
+    return max(1, min(12, configured))
+
+
+def _canonical_http_url(url: str, *, base_url: str) -> str:
+    candidate = str(url or "").strip()
+    if not candidate:
+        return ""
+    if candidate.startswith("#") or candidate.lower().startswith(("mailto:", "javascript:")):
+        return ""
+    absolute = urljoin(base_url, candidate)
+    absolute, _ = urldefrag(absolute)
+    parsed = urlparse(absolute)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    return absolute
+
+
+def _clean_anchor_text(text: str) -> str:
+    cleaned = _TAG_RE.sub(" ", str(text or ""))
+    cleaned = unescape(cleaned)
+    cleaned = _WHITESPACE_RE.sub(" ", cleaned).strip()
+    return cleaned[:180]
+
+
+def _extract_internal_links(
+    raw_html: str,
+    *,
+    base_url: str,
+    max_links: int,
+) -> list[dict]:
+    base_host = _normalized_host(base_url)
+    base_group = _domain_group_key(base_host)
+    if not base_group:
+        return []
+
+    links: list[dict] = []
+    seen: set[str] = set()
+    for href, anchor_html in _ANCHOR_TAG_RE.findall(str(raw_html or "")[:600_000]):
+        normalized_url = _canonical_http_url(href, base_url=base_url)
+        if not normalized_url:
+            continue
+        host_group = _domain_group_key(_normalized_host(normalized_url))
+        if host_group != base_group:
+            continue
+        if normalized_url in seen:
+            continue
+        seen.add(normalized_url)
+        anchor_text = _clean_anchor_text(anchor_html)
+        path_lower = str(urlparse(normalized_url).path or "").lower()
+        score = 0.0
+        if path_lower.endswith(".pdf"):
+            score += 1.8
+        if any(marker in path_lower for marker in _CRAWL_PRIORITY_MARKERS):
+            score += 1.2
+        lowered_anchor = anchor_text.lower()
+        if any(marker in lowered_anchor for marker in _CRAWL_PRIORITY_MARKERS):
+            score += 1.0
+        if re.search(r"\b(master|m\.sc|msc|program|programme|course)\b", lowered_anchor):
+            score += 0.5
+        if len(anchor_text) < 4:
+            score -= 0.2
+        links.append(
+            {
+                "url": normalized_url,
+                "text": anchor_text,
+                "score": round(score, 4),
+            }
+        )
+    links.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
+    return links[: max(1, max_links)]
+
+
+def _crawl_keyword_set(required_fields: list[dict]) -> set[str]:
+    keywords: set[str] = set(_CRAWL_PRIORITY_MARKERS)
+    for field in required_fields:
+        field_id = str((field or {}).get("id", "")).strip()
+        for keyword in _REQUIRED_FIELD_CRAWL_HINTS.get(field_id, ()):
+            keywords.add(keyword)
+    return {item for item in keywords if item}
+
+
+def _prioritized_internal_links(
+    links: list[dict],
+    *,
+    required_fields: list[dict],
+    per_parent_limit: int,
+) -> list[dict]:
+    if not links:
+        return []
+    keywords = _crawl_keyword_set(required_fields)
+
+    def _priority(item: dict) -> float:
+        url = str(item.get("url", "")).strip().lower()
+        text = str(item.get("text", "")).strip().lower()
+        score = float(item.get("score", 0.0) or 0.0)
+        for keyword in keywords:
+            if keyword in url:
+                score += 0.4
+            if keyword in text:
+                score += 0.3
+        return score
+
+    ranked = sorted(links, key=_priority, reverse=True)
+    return ranked[: max(1, per_parent_limit)]
+
+
 def _extract_pdf_text(raw_bytes: bytes, *, max_chars: int) -> str:
     if not raw_bytes or PdfReader is None:
         return ""
@@ -549,23 +878,31 @@ def _fetch_page_data_sync(url: str, timeout_seconds: float, max_chars: int) -> d
         return {
             "content": _extract_pdf_text(raw_bytes, max_chars=max_chars),
             "published_date": "",
+            "internal_links": [],
         }
     if "text/html" in content_type:
         raw = raw_bytes.decode("utf-8", errors="ignore")
         return {
             "content": _clean_html_text(raw, max_chars=max_chars),
             "published_date": _extract_published_date(raw),
+            "internal_links": _extract_internal_links(
+                raw,
+                base_url=url,
+                max_links=_internal_crawl_links_per_page(),
+            ),
         }
     if "text/" in content_type:
         raw = raw_bytes.decode("utf-8", errors="ignore")
         return {
             "content": _clean_plain_text(raw, max_chars=max_chars),
             "published_date": "",
+            "internal_links": [],
         }
 
     return {
         "content": "",
         "published_date": "",
+        "internal_links": [],
     }
 
 
@@ -705,6 +1042,138 @@ async def _afetch_organic_pages(
     return fetched
 
 
+def _crawl_row_for_url(*, url: str, anchor_text: str, parent_url: str) -> dict:
+    host_label = _host_label(url)
+    title = anchor_text or host_label
+    snippet = (
+        "Internal official page discovered from "
+        f"{parent_url}. Prioritize admission requirements, language, deadlines, "
+        "application portal, and regulations."
+    )
+    return {
+        "title": title[:160],
+        "url": url,
+        "snippet": snippet[:320],
+        "published_date": "",
+    }
+
+
+async def _acrawl_internal_pages(
+    *,
+    seed_rows: list[dict],
+    seed_page_data_by_url: dict[str, dict],
+    required_fields: list[dict],
+    allowed_suffixes: list[str],
+    target_domain_groups: list[str] | None,
+    enforce_target_domain_scope: bool,
+) -> tuple[list[dict], dict[str, dict], dict]:
+    if not _internal_crawl_enabled():
+        return [], {}, {
+            "enabled": False,
+            "pages_fetched": 0,
+            "discovered_urls": 0,
+            "depth_reached": 0,
+        }
+    if not seed_rows:
+        return [], {}, {
+            "enabled": True,
+            "pages_fetched": 0,
+            "discovered_urls": 0,
+            "depth_reached": 0,
+        }
+
+    max_depth = _internal_crawl_max_depth()
+    max_pages = _internal_crawl_max_pages()
+    per_parent_limit = _internal_crawl_per_parent_limit()
+    max_links = _internal_crawl_links_per_page()
+    visited_urls = {
+        str(row.get("url", "")).strip()
+        for row in seed_rows
+        if isinstance(row, dict) and str(row.get("url", "")).strip()
+    }
+    discovered_rows: list[dict] = []
+    discovered_page_data: dict[str, dict] = {}
+    current_layer: list[str] = sorted(visited_urls)
+    total_discovered = 0
+    depth_reached = 0
+
+    for depth in range(1, max_depth + 1):
+        if not current_layer or len(discovered_rows) >= max_pages:
+            break
+        next_rows: list[dict] = []
+        for parent_url in current_layer:
+            parent_payload = seed_page_data_by_url.get(parent_url) or discovered_page_data.get(parent_url)
+            parent_payload = parent_payload if isinstance(parent_payload, dict) else {}
+            internal_links = parent_payload.get("internal_links")
+            internal_links = internal_links if isinstance(internal_links, list) else []
+            if not internal_links:
+                continue
+            ranked_links = _prioritized_internal_links(
+                internal_links[:max_links],
+                required_fields=required_fields,
+                per_parent_limit=per_parent_limit,
+            )
+            for link in ranked_links:
+                url = str(link.get("url", "")).strip()
+                if not url or url in visited_urls:
+                    continue
+                if allowed_suffixes and not _url_matches_allowed_suffix(url, allowed_suffixes):
+                    continue
+                if enforce_target_domain_scope and not _url_matches_target_domain_scope(
+                    url, target_domain_groups
+                ):
+                    continue
+                visited_urls.add(url)
+                next_rows.append(
+                    _crawl_row_for_url(
+                        url=url,
+                        anchor_text=str(link.get("text", "")).strip(),
+                        parent_url=parent_url,
+                    )
+                )
+                if len(discovered_rows) + len(next_rows) >= max_pages:
+                    break
+            if len(discovered_rows) + len(next_rows) >= max_pages:
+                break
+
+        if not next_rows:
+            break
+        fetch_rows = _dedupe_rows(
+            next_rows,
+            limit=max_pages - len(discovered_rows),
+        )
+        if not fetch_rows:
+            break
+        fetched = await _afetch_organic_pages(fetch_rows)
+        usable_rows: list[dict] = []
+        for row in fetch_rows:
+            url = str(row.get("url", "")).strip()
+            payload = fetched.get(url)
+            payload = payload if isinstance(payload, dict) else {}
+            content = " ".join(str(payload.get("content", "")).split()).strip()
+            if not content:
+                continue
+            discovered_page_data[url] = payload
+            usable_rows.append(row)
+        if not usable_rows:
+            break
+        discovered_rows.extend(usable_rows)
+        total_discovered += len(usable_rows)
+        current_layer = [
+            str(item.get("url", "")).strip()
+            for item in usable_rows
+            if str(item.get("url", "")).strip()
+        ]
+        depth_reached = depth
+
+    return discovered_rows, discovered_page_data, {
+        "enabled": True,
+        "pages_fetched": len(discovered_page_data),
+        "discovered_urls": total_discovered,
+        "depth_reached": depth_reached,
+    }
+
+
 def _host_label(url: str) -> str:
     parsed = urlparse(url)
     return parsed.netloc or "web"
@@ -810,16 +1279,137 @@ def _host_looks_official_institution(host: str) -> bool:
     return any(label.startswith(_OFFICIAL_SOURCE_HOST_PREFIXES) for label in labels)
 
 
+def _host_is_acronym_like(host: str) -> bool:
+    grouped = _domain_group_key(host)
+    if not grouped:
+        return False
+    labels = [label for label in grouped.split(".") if label]
+    if not labels:
+        return False
+    root = labels[0]
+    if not root or not root.isalpha():
+        return False
+    if root in _ACRONYM_LIKE_HOST_BLOCKLIST:
+        return False
+    return 2 <= len(root) <= 6
+
+
+def _required_field_ids(required_fields: list[dict]) -> set[str]:
+    ids: set[str] = set()
+    for field in required_fields:
+        field_id = str((field or {}).get("id", "")).strip()
+        if field_id:
+            ids.add(field_id)
+    return ids
+
+
+def _is_admissions_high_precision_query(query: str, required_fields: list[dict] | None = None) -> bool:
+    ids = _required_field_ids(required_fields or [])
+    if ids & _ADMISSIONS_HIGH_PRECISION_FIELD_IDS:
+        return True
+    compact = " ".join(str(query or "").split()).strip().lower()
+    if not compact:
+        return False
+    has_program_context = bool(
+        re.search(r"\b(university|uni|master|m\.sc|msc|program|programme|course|admission)\b", compact)
+    )
+    if not has_program_context:
+        return False
+    return bool(
+        re.search(
+            r"\b(requirements?|eligibility|ielts|toefl|cefr|international students?|deadline|"
+            r"ects|credits?|gpa|grade)\b",
+            compact,
+        )
+    )
+
+
+def _is_university_program_query(query: str) -> bool:
+    compact = " ".join(str(query or "").split()).strip().lower()
+    if not compact:
+        return False
+    has_institution = bool(
+        re.search(
+            r"\b(university|universit[a-z]*|uni|technical university|technische universita[et]|tu)\b",
+            compact,
+        )
+    )
+    if not has_institution:
+        return False
+    return bool(re.search(r"\b(master|masters|m\.sc|msc|program|programme|course|degree)\b", compact))
+
+
+def _target_domain_groups_for_query(query: str) -> list[str]:
+    groups: list[str] = []
+    seen: set[str] = set()
+    for domain in _official_domains_for_query(query):
+        group = _domain_group_key(domain)
+        if not group or group in seen:
+            continue
+        seen.add(group)
+        groups.append(group)
+    return groups
+
+
+def _filter_rows_by_target_domain_groups(
+    rows: list[dict],
+    *,
+    target_groups: list[str],
+    allow_fallback_on_empty: bool = True,
+) -> list[dict]:
+    if not target_groups:
+        return rows
+    target_set = {str(item).strip().lower() for item in target_groups if str(item).strip()}
+    if not target_set:
+        return rows
+    allowlist_groups = {
+        _domain_group_key(domain)
+        for domain in _normalized_official_source_allowlist()
+        if _domain_group_key(domain)
+    }
+    filtered: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        url = str(row.get("url", "")).strip()
+        group = _domain_group_key(_normalized_host(url))
+        if not group:
+            continue
+        if group in target_set or group in allowlist_groups:
+            filtered.append(row)
+    if filtered:
+        return filtered
+    return rows if allow_fallback_on_empty else []
+
+
+def _url_matches_target_domain_scope(url: str, target_groups: list[str] | None) -> bool:
+    if not target_groups:
+        return True
+    target_set = {str(item).strip().lower() for item in target_groups if str(item).strip()}
+    if not target_set:
+        return True
+    allowlist_groups = {
+        _domain_group_key(domain)
+        for domain in _normalized_official_source_allowlist()
+        if _domain_group_key(domain)
+    }
+    group = _domain_group_key(_normalized_host(url))
+    if not group:
+        return False
+    return group in target_set or group in allowlist_groups
+
+
 def _source_url_allowed(
     *,
     url: str,
     title: str,
     snippet: str,
     allowed_suffixes: list[str],
+    strict_official: bool = False,
 ) -> bool:
     if not _url_matches_allowed_suffix(url, allowed_suffixes):
         return False
-    if not bool(getattr(settings.web_search, "official_source_filter_enabled", True)):
+    if not bool(getattr(settings.web_search, "official_source_filter_enabled", True)) and not strict_official:
         return True
     host = _normalized_host(url)
     if not host:
@@ -835,6 +1425,13 @@ def _source_url_allowed(
         return True
 
     evidence_text = f"{title} {snippet}"
+    if strict_official:
+        return bool(
+            _host_is_acronym_like(host)
+            and _contains_marker(evidence_text, _OFFICIAL_SOURCE_TEXT_MARKERS)
+            and _contains_marker(evidence_text, _ACADEMIC_PAGE_MARKERS)
+        )
+
     if not _contains_marker(evidence_text, _OFFICIAL_SOURCE_TEXT_MARKERS):
         return False
     return _contains_marker(evidence_text, _ACADEMIC_PAGE_MARKERS)
@@ -873,6 +1470,9 @@ def _build_query_variants(query: str, allowed_suffixes: list[str]) -> list[str]:
     official_domains = _official_domains_for_query(base)[:3]
     comparison_entities = _comparison_entities_from_query(base)
     candidates: list[str] = [base]
+    if allowed_suffixes:
+        site_terms = " OR ".join(f"site:{suffix}" for suffix in allowed_suffixes[:2])
+        candidates.append(f"{base} ({site_terms})")
     for entity in comparison_entities:
         entity_focus = _entity_focus_query(entity)
         if not entity_focus:
@@ -887,9 +1487,6 @@ def _build_query_variants(query: str, allowed_suffixes: list[str]) -> list[str]:
     if compact and compact != base.lower():
         candidates.append(compact)
 
-    if allowed_suffixes:
-        site_terms = " OR ".join(f"site:{suffix}" for suffix in allowed_suffixes[:2])
-        candidates.append(f"{base} ({site_terms})")
     if _DEADLINE_HINT_RE.search(base):
         candidates.append(f"{base} application deadline official")
     if _REQUIREMENTS_HINT_RE.search(base):
@@ -982,10 +1579,14 @@ def _planner_query_limit_for_query(query: str) -> int:
     base = _max_planner_queries()
     if not _is_deep_search_mode():
         return base
-    required_fields_count = len(_required_fields_from_query(query))
+    required_fields = _required_fields_from_query(query)
+    required_fields_count = len(required_fields)
     focus_count = len(_coverage_subquestions_from_query(query))
     boost = min(5, max(required_fields_count, focus_count))
-    return min(12, max(base, base + boost))
+    limit = min(12, max(base, base + boost))
+    if _is_admissions_high_precision_query(query, required_fields):
+        limit = min(14, max(limit, base + 4))
+    return limit
 
 
 async def _call_planner_model_text(
@@ -1025,17 +1626,41 @@ def _required_fields_from_query(query: str) -> list[dict]:
             "subquestion": "course requirements, eligibility criteria, and required documents",
             "query_focus": "admission requirements eligibility required documents",
         },
+        "gpa_threshold": {
+            "id": "gpa_threshold",
+            "label": "GPA/grade threshold",
+            "subquestion": "minimum GPA/grade threshold and grading scale details",
+            "query_focus": "minimum GPA grade threshold admission score requirement",
+        },
+        "ects_breakdown": {
+            "id": "ects_breakdown",
+            "label": "ECTS/prerequisite credits",
+            "subquestion": "required ECTS or prerequisite credit breakdown by subject area",
+            "query_focus": "required ECTS prerequisite credits mathematics computer science",
+        },
         "language_requirements": {
             "id": "language_requirements",
             "label": "language requirements",
             "subquestion": "language requirements with accepted tests and minimum scores",
             "query_focus": "language requirements IELTS TOEFL minimum score",
         },
+        "language_score_thresholds": {
+            "id": "language_score_thresholds",
+            "label": "language score thresholds",
+            "subquestion": "exact IELTS/TOEFL/CEFR minimum score thresholds",
+            "query_focus": "IELTS TOEFL CEFR minimum score thresholds exact values",
+        },
         "application_deadline": {
             "id": "application_deadline",
             "label": "application deadlines",
             "subquestion": "application deadline and intake timeline with exact dates",
             "query_focus": "application deadline exact dates intake timeline",
+        },
+        "application_portal": {
+            "id": "application_portal",
+            "label": "application portal",
+            "subquestion": "official application portal URL and where to apply",
+            "query_focus": "official application portal URL where to apply",
         },
         "duration_ects": {
             "id": "duration_ects",
@@ -1058,15 +1683,24 @@ def _required_fields_from_query(query: str) -> list[dict]:
     }
     selected_ids: list[str] = []
     explicit_admission_scope = bool(
-        re.search(r"\b(admission|eligibility|entry|documents?|course requirements?)\b", compact)
+        re.search(
+            r"\b(admission requirements?|eligibility|entry|documents?|course requirements?)\b",
+            compact,
+        )
     )
     language_only_requirements = bool(_LANGUAGE_HINT_RE.search(compact)) and not explicit_admission_scope
+    has_program_context = bool(re.search(r"\b(master|m\.sc|msc|program|course|study|degree)\b", compact))
     if _REQUIREMENTS_HINT_RE.search(compact) and not language_only_requirements:
         selected_ids.append("admission_requirements")
+        selected_ids.append("gpa_threshold")
+        selected_ids.append("ects_breakdown")
     if _LANGUAGE_HINT_RE.search(compact):
         selected_ids.append("language_requirements")
+        selected_ids.append("language_score_thresholds")
     if _DEADLINE_HINT_RE.search(compact) or "application" in compact:
         selected_ids.append("application_deadline")
+    if _PORTAL_HINT_RE.search(compact):
+        selected_ids.append("application_portal")
     if _CURRICULUM_HINT_RE.search(compact) or "course" in compact:
         selected_ids.append("curriculum_modules")
     if _TUITION_HINT_RE.search(compact):
@@ -1074,14 +1708,36 @@ def _required_fields_from_query(query: str) -> list[dict]:
     if re.search(r"\b(duration|ects|credit|semester|year)\b", compact):
         selected_ids.append("duration_ects")
 
-    if re.search(r"\b(master|m\.sc|msc|program|course|study)\b", compact):
+    if has_program_context:
         selected_ids.insert(0, "program_overview")
 
     if not selected_ids:
-        if re.search(r"\b(master|m\.sc|msc|program|course|degree)\b", compact):
+        if has_program_context:
             selected_ids = ["program_overview"]
         else:
             selected_ids = []
+
+    broad_profile_query = bool(
+        has_program_context
+        and re.search(r"\b(tell me about|about|overview|details?|information)\b", compact)
+    )
+    explicit_scope_present = bool(
+        _REQUIREMENTS_HINT_RE.search(compact)
+        or _LANGUAGE_HINT_RE.search(compact)
+        or _DEADLINE_HINT_RE.search(compact)
+        or _TUITION_HINT_RE.search(compact)
+    )
+    if broad_profile_query and not explicit_scope_present:
+        selected_ids.extend(
+            [
+                "duration_ects",
+                "admission_requirements",
+                "language_requirements",
+                "application_deadline",
+                "application_portal",
+                "curriculum_modules",
+            ]
+        )
 
     normalized: list[dict] = []
     seen: set[str] = set()
@@ -1108,7 +1764,10 @@ def _coverage_subquestions_from_query(query: str) -> list[str]:
     if not compact:
         return _normalize_subquestion_list(candidates, limit=_max_planner_subquestions())
     explicit_admission_scope = bool(
-        re.search(r"\b(admission|eligibility|entry|documents?|course requirements?)\b", compact)
+        re.search(
+            r"\b(admission requirements?|eligibility|entry|documents?|course requirements?)\b",
+            compact,
+        )
     )
     language_only_requirements = bool(_LANGUAGE_HINT_RE.search(compact)) and not explicit_admission_scope
     if _REQUIREMENTS_HINT_RE.search(compact) and not language_only_requirements:
@@ -1658,13 +2317,27 @@ def _required_field_covered_by_text(field_id: str, text: str) -> bool:
         )
     if field_id == "admission_requirements":
         return bool(_ADMISSION_CONTENT_RE.search(compact))
+    if field_id == "gpa_threshold":
+        return bool(_GPA_CONTENT_RE.search(compact) and _NUMERIC_TOKEN_RE.search(compact))
+    if field_id == "ects_breakdown":
+        return bool(
+            re.search(r"\b(ects|credit points?|credits|cp|prerequisite credits?)\b", compact)
+            and _NUMERIC_TOKEN_RE.search(compact)
+        )
     if field_id == "language_requirements":
         return bool(
             _LANGUAGE_CONTENT_RE.search(compact)
             and (_LANGUAGE_SCORE_RE.search(compact) or _NUMERIC_TOKEN_RE.search(compact))
         )
+    if field_id == "language_score_thresholds":
+        return bool(_LANGUAGE_SCORE_RE.search(compact))
     if field_id == "application_deadline":
         return bool(_DEADLINE_CONTENT_RE.search(compact) and _DATE_VALUE_RE.search(compact))
+    if field_id == "application_portal":
+        return bool(
+            _PORTAL_CONTENT_RE.search(compact)
+            and ("http://" in compact or "https://" in compact or "www." in compact)
+        )
     if field_id == "duration_ects":
         return bool(_DURATION_ECTS_CONTENT_RE.search(compact) and _NUMERIC_TOKEN_RE.search(compact))
     if field_id == "curriculum_modules":
@@ -1773,6 +2446,19 @@ def _url_matches_allowed_suffix(url: str, allowed_suffixes: list[str]) -> bool:
 
 
 def _filter_rows_by_allowed_domains(rows: list[dict], allowed_suffixes: list[str]) -> list[dict]:
+    return _filter_rows_by_allowed_domains_with_policy(
+        rows,
+        allowed_suffixes,
+        strict_official=False,
+    )
+
+
+def _filter_rows_by_allowed_domains_with_policy(
+    rows: list[dict],
+    allowed_suffixes: list[str],
+    *,
+    strict_official: bool,
+) -> list[dict]:
     filtered: list[dict] = []
     for row in rows:
         if not isinstance(row, dict):
@@ -1785,6 +2471,7 @@ def _filter_rows_by_allowed_domains(rows: list[dict], allowed_suffixes: list[str
             title=title,
             snippet=snippet,
             allowed_suffixes=allowed_suffixes,
+            strict_official=strict_official,
         ):
             continue
         filtered.append(row)
@@ -2139,15 +2826,19 @@ async def _asearch_payloads(query_variants: list[str], *, top_k: int) -> list[di
     search_depth = _search_depth_for_mode()
     num_results = _default_num_for_mode(top_k)
     multi_query_enabled = bool(getattr(settings.web_search, "multi_query_enabled", False))
-    if len(query_variants) == 1 and not multi_query_enabled:
-        payload = await asearch_google(
-            query_variants[0],
-            gl=settings.web_search.default_gl,
-            hl=settings.web_search.default_hl,
-            num=num_results,
-            search_depth=search_depth,
-        )
-        return [payload] if isinstance(payload, dict) else []
+    if not multi_query_enabled:
+        payloads: list[dict] = []
+        for query in query_variants:
+            payload = await asearch_google(
+                query,
+                gl=settings.web_search.default_gl,
+                hl=settings.web_search.default_hl,
+                num=num_results,
+                search_depth=search_depth,
+            )
+            if isinstance(payload, dict) and payload:
+                payloads.append(payload)
+        return payloads
 
     batch = await asearch_google_batch(
         query_variants,
@@ -2181,6 +2872,9 @@ def _collect_search_rows(
     *,
     top_k: int,
     allowed_suffixes: list[str],
+    strict_official: bool = False,
+    target_domain_groups: list[str] | None = None,
+    enforce_target_domain_scope: bool = False,
 ) -> list[dict]:
     per_query_limit = _default_num_for_mode(top_k)
     merged_rows: list[dict] = []
@@ -2188,7 +2882,18 @@ def _collect_search_rows(
         merged_rows.extend(_organic_rows(payload, limit=per_query_limit))
     dedupe_limit = max(top_k, _max_context_results_for_mode()) * max(1, len(query_variants))
     rows = _dedupe_rows(merged_rows, limit=dedupe_limit)
-    return _filter_rows_by_allowed_domains(rows, allowed_suffixes)
+    rows = _filter_rows_by_allowed_domains_with_policy(
+        rows,
+        allowed_suffixes,
+        strict_official=strict_official,
+    )
+    if target_domain_groups:
+        rows = _filter_rows_by_target_domain_groups(
+            rows,
+            target_groups=target_domain_groups,
+            allow_fallback_on_empty=not enforce_target_domain_scope,
+        )
+    return rows
 
 
 def _collect_search_rows_with_domain_retry(
@@ -2197,6 +2902,9 @@ def _collect_search_rows_with_domain_retry(
     *,
     top_k: int,
     allowed_suffixes: list[str],
+    strict_official: bool = False,
+    target_domain_groups: list[str] | None = None,
+    enforce_target_domain_scope: bool = False,
 ) -> tuple[list[dict], bool]:
     """Collect rows with strict source filtering and no domain-relax fallback."""
     rows = _collect_search_rows(
@@ -2204,6 +2912,9 @@ def _collect_search_rows_with_domain_retry(
         query_variants,
         top_k=top_k,
         allowed_suffixes=allowed_suffixes,
+        strict_official=strict_official,
+        target_domain_groups=target_domain_groups,
+        enforce_target_domain_scope=enforce_target_domain_scope,
     )
     return rows, False
 
@@ -2284,6 +2995,9 @@ def _organic_row_candidates(
     page_data_by_url: dict[str, dict],
     allowed_suffixes: list[str],
     query_tokens: set[str],
+    strict_official: bool = False,
+    target_domain_groups: list[str] | None = None,
+    enforce_target_domain_scope: bool = False,
 ) -> list[dict]:
     title = str(row.get("title", "")).strip()
     url = str(row.get("url", "")).strip()
@@ -2293,7 +3007,10 @@ def _organic_row_candidates(
         title=title,
         snippet=snippet,
         allowed_suffixes=allowed_suffixes,
+        strict_official=strict_official,
     ):
+        return []
+    if enforce_target_domain_scope and not _url_matches_target_domain_scope(url, target_domain_groups):
         return []
 
     row_published_date = str(row.get("published_date", "")).strip()
@@ -2344,6 +3061,9 @@ def _build_organic_candidates(
     page_data_by_url: dict[str, dict],
     query_tokens: set[str],
     allowed_suffixes: list[str],
+    strict_official: bool = False,
+    target_domain_groups: list[str] | None = None,
+    enforce_target_domain_scope: bool = False,
 ) -> list[dict]:
     candidates: list[dict] = []
     for index, row in enumerate(rows, start=1):
@@ -2356,6 +3076,9 @@ def _build_organic_candidates(
                 page_data_by_url=page_data_by_url,
                 allowed_suffixes=allowed_suffixes,
                 query_tokens=query_tokens,
+                strict_official=strict_official,
+                target_domain_groups=target_domain_groups,
+                enforce_target_domain_scope=enforce_target_domain_scope,
             )
         )
     return candidates
@@ -2567,14 +3290,18 @@ def _build_required_field_queries(
         return []
 
     candidates: list[str] = []
-    seen_domains = {
-        _domain_group_key(str(host).strip().lower())
-        for host in unique_domains
-        if str(host).strip()
-    }
-    seen_domains.discard("")
+    official_domains = _official_domains_for_query(query)[:4]
+    domain_candidates: list[str] = []
+    domain_seen: set[str] = set()
+    for domain in official_domains + list(unique_domains):
+        grouped = _domain_group_key(str(domain).strip().lower())
+        if not grouped or grouped in domain_seen:
+            continue
+        if not (_host_looks_official_institution(grouped) or _host_is_acronym_like(grouped)):
+            continue
+        domain_seen.add(grouped)
+        domain_candidates.append(grouped)
 
-    official_domains = _official_domains_for_query(query)[:3]
     suffix_scope = ""
     if allowed_suffixes:
         suffix_scope = " (" + " OR ".join(f"site:{suffix}" for suffix in allowed_suffixes[:2]) + ")"
@@ -2584,13 +3311,29 @@ def _build_required_field_queries(
             "admission requirements eligibility criteria required documents",
             "prerequisite credits bachelor degree requirements",
         ],
+        "gpa_threshold": [
+            "minimum GPA grade threshold grading scale required score",
+            "minimum final grade admission criteria",
+        ],
+        "ects_breakdown": [
+            "required ECTS credits in mathematics computer science prerequisite modules",
+            "prerequisite credit breakdown by subject area",
+        ],
         "language_requirements": [
             "english language requirements IELTS TOEFL CEFR minimum score",
             "accepted language certificates and minimum scores",
         ],
+        "language_score_thresholds": [
+            "IELTS TOEFL CEFR minimum score exact thresholds",
+            "accepted English test score requirements exact values",
+        ],
         "application_deadline": [
             "application deadline exact dates apply by closing date intake timeline",
             "application period start date end date winter semester summer semester",
+        ],
+        "application_portal": [
+            "official application portal URL where to apply",
+            "apply online portal application system official page",
         ],
         "duration_ects": [
             "program duration semesters years total ECTS credits",
@@ -2619,10 +3362,7 @@ def _build_required_field_queries(
             candidates.append(f"{query} {normalized_focus} official pdf")
             if suffix_scope:
                 candidates.append(f"{query} {normalized_focus}{suffix_scope}")
-            for domain in official_domains:
-                grouped = _domain_group_key(domain)
-                if grouped in seen_domains:
-                    continue
+            for domain in domain_candidates:
                 candidates.append(f"{query} {normalized_focus} site:{domain}")
 
     max_gap_queries = max(1, int(getattr(settings.web_search, "retrieval_loop_max_gap_queries", 2)))
@@ -2646,7 +3386,8 @@ def _build_follow_up_queries(
     unique_domains: list[str],
 ) -> list[str]:
     max_gap_queries = max(1, int(getattr(settings.web_search, "retrieval_loop_max_gap_queries", 2)))
-    candidate_limit = min(28, max_gap_queries * 6)
+    high_precision = _is_admissions_high_precision_query(query, missing_required_fields)
+    candidate_limit = min(42 if high_precision else 28, max_gap_queries * (8 if high_precision else 6))
     required_field_queries = _build_required_field_queries(
         query,
         missing_required_fields=missing_required_fields,
@@ -2714,6 +3455,60 @@ def _retrieval_loop_enabled() -> bool:
     return _is_deep_search_mode() and bool(getattr(settings.web_search, "retrieval_loop_enabled", True))
 
 
+def _required_field_rescue_enabled() -> bool:
+    return _is_deep_search_mode() and bool(
+        getattr(settings.web_search, "deep_required_field_rescue_enabled", True)
+    )
+
+
+def _required_field_rescue_max_queries() -> int:
+    configured = int(getattr(settings.web_search, "deep_required_field_rescue_max_queries", 6) or 6)
+    return max(1, min(12, configured))
+
+
+def _required_field_coverage_target(query: str, required_fields: list[dict]) -> float:
+    if not required_fields:
+        return 1.0
+    configured = float(getattr(settings.web_search, "deep_required_field_min_coverage", 0.85) or 0.85)
+    target = max(0.5, min(1.0, configured))
+    if _is_admissions_high_precision_query(query, required_fields):
+        target = max(target, 0.9)
+    if _is_university_program_query(query) and len(required_fields) >= 4:
+        # Explicit multi-field university queries should close all requested fields in deep mode.
+        target = 1.0
+    return target
+
+
+def _target_domain_coverage_count(unique_domains: list[str], target_domain_groups: list[str]) -> int:
+    if not target_domain_groups:
+        return 0
+    target_set = {str(item).strip().lower() for item in target_domain_groups if str(item).strip()}
+    if not target_set:
+        return 0
+    count = 0
+    for domain in unique_domains:
+        grouped = _domain_group_key(str(domain))
+        if grouped in target_set:
+            count += 1
+    return count
+
+
+def _effective_retrieval_loop_max_steps(query: str, required_fields: list[dict], *, deep_mode: bool) -> int:
+    base = max(1, int(getattr(settings.web_search, "retrieval_loop_max_steps", 2)))
+    if not deep_mode:
+        return 1
+    boost = 0
+    if len(required_fields) >= 4:
+        boost += 1
+    if _is_university_program_query(query):
+        boost += 1
+    if _is_admissions_high_precision_query(query, required_fields):
+        boost += 1
+    if _is_university_program_query(query) and len(required_fields) >= 4:
+        boost += 1
+    return max(1, min(8, base + boost))
+
+
 async def aretrieve_web_chunks(
     query: str,
     *,
@@ -2744,6 +3539,16 @@ async def _aretrieve_web_chunks_impl(
     normalized_mode = _normalized_search_mode(search_mode)
     deep_mode = _is_deep_search_mode(normalized_mode)
     required_fields = _required_fields_from_query(query) if deep_mode else []
+    strict_official_sources = bool(
+        deep_mode
+        and (
+            _is_admissions_high_precision_query(query, required_fields)
+            or _is_university_program_query(query)
+        )
+    )
+    target_domain_groups = _target_domain_groups_for_query(query) if strict_official_sources else []
+    enforce_target_domain_scope = bool(strict_official_sources and target_domain_groups)
+    coverage_target = _required_field_coverage_target(query, required_fields) if deep_mode else 1.0
     if deep_mode:
         query_plan = await _resolve_query_plan(query, allowed_suffixes)
     else:
@@ -2761,6 +3566,10 @@ async def _aretrieve_web_chunks_impl(
             "subquestions": query_plan.get("subquestions", []),
             "required_fields": [str(field.get("id", "")).strip() for field in required_fields],
             "queries": query_plan.get("queries", []),
+            "strict_official_sources": strict_official_sources,
+            "target_domain_groups": target_domain_groups,
+            "target_domain_scope_enforced": enforce_target_domain_scope,
+            "required_field_coverage_target": coverage_target,
         },
     )
     planned_query_limit = (
@@ -2787,7 +3596,7 @@ async def _aretrieve_web_chunks_impl(
     seen_queries: set[str] = set()
     executed_queries: list[str] = []
     loop_llm_used = False
-    max_steps = max(1, int(getattr(settings.web_search, "retrieval_loop_max_steps", 2)))
+    max_steps = _effective_retrieval_loop_max_steps(query, required_fields, deep_mode=deep_mode)
     if not deep_mode or not _retrieval_loop_enabled():
         max_steps = 1
 
@@ -2889,6 +3698,9 @@ async def _aretrieve_web_chunks_impl(
             loop_queries,
             top_k=top_k,
             allowed_suffixes=allowed_suffixes,
+            strict_official=strict_official_sources,
+            target_domain_groups=target_domain_groups,
+            enforce_target_domain_scope=enforce_target_domain_scope,
         )
         domain_filter_relaxed = domain_filter_relaxed or relaxed
         emit_trace_event(
@@ -2907,6 +3719,45 @@ async def _aretrieve_web_chunks_impl(
         else:
             page_data_by_url = await _afetch_organic_pages(rows, max_pages_to_fetch=1)
         fetch_ms_total += _elapsed_ms(fetch_started_at)
+        crawl_summary = {
+            "enabled": False,
+            "pages_fetched": 0,
+            "discovered_urls": 0,
+            "depth_reached": 0,
+        }
+        rows_for_candidates = list(rows)
+        if deep_mode and rows:
+            crawl_started_at = time.perf_counter()
+            crawl_rows, crawl_page_data, crawl_summary = await _acrawl_internal_pages(
+                seed_rows=rows,
+                seed_page_data_by_url=page_data_by_url,
+                required_fields=missing_required_fields or required_fields,
+                allowed_suffixes=allowed_suffixes,
+                target_domain_groups=target_domain_groups,
+                enforce_target_domain_scope=enforce_target_domain_scope,
+            )
+            fetch_ms_total += _elapsed_ms(crawl_started_at)
+            if crawl_page_data:
+                page_data_by_url.update(crawl_page_data)
+            if crawl_rows:
+                rows_for_candidates = _dedupe_rows(
+                    rows + crawl_rows,
+                    limit=max(
+                        _max_context_results_for_mode() * 8,
+                        len(rows) + len(crawl_rows),
+                    ),
+                )
+            emit_trace_event(
+                "internal_crawl_completed",
+                {
+                    "step": step,
+                    "enabled": bool(crawl_summary.get("enabled", False)),
+                    "depth_reached": int(crawl_summary.get("depth_reached", 0) or 0),
+                    "pages_fetched": int(crawl_summary.get("pages_fetched", 0) or 0),
+                    "discovered_urls": int(crawl_summary.get("discovered_urls", 0) or 0),
+                    "urls": [str(row.get("url", "")).strip() for row in crawl_rows[:8]],
+                },
+            )
         emit_trace_event(
             "pages_read",
             {
@@ -2918,10 +3769,13 @@ async def _aretrieve_web_chunks_impl(
 
         query_tokens = _query_tokens(" ".join(loop_queries))
         candidates = _build_organic_candidates(
-            rows=rows,
+            rows=rows_for_candidates,
             page_data_by_url=page_data_by_url,
             query_tokens=query_tokens,
             allowed_suffixes=allowed_suffixes,
+            strict_official=strict_official_sources,
+            target_domain_groups=target_domain_groups,
+            enforce_target_domain_scope=enforce_target_domain_scope,
         )
         ai_candidate = _ai_overview_candidate(payloads, allowed_suffixes)
         if ai_candidate:
@@ -2951,6 +3805,8 @@ async def _aretrieve_web_chunks_impl(
         next_heuristic_missing = _identify_missing_subquestions(subquestions, all_facts)
         next_required_status = _required_field_coverage(required_fields, all_candidates)
         next_missing_required_ids = list(next_required_status.get("missing_ids", []))
+        next_coverage = float(next_required_status.get("coverage", 1.0) or 0.0)
+        target_coverage_count = _target_domain_coverage_count(unique_domains, target_domain_groups)
         next_missing_required_fields = _required_fields_by_ids(required_fields, next_missing_required_ids)
         next_missing = _combine_missing_subquestions(
             list(next_heuristic_missing) + list(next_required_status.get("missing_subquestions", [])),
@@ -2969,6 +3825,8 @@ async def _aretrieve_web_chunks_impl(
                 len(unique_domains) >= _retrieval_min_unique_domains()
                 and not next_missing
                 and not next_missing_required_ids
+                and next_coverage >= coverage_target
+                and (not enforce_target_domain_scope or target_coverage_count > 0)
             )
             if deep_mode
             else True
@@ -2984,10 +3842,12 @@ async def _aretrieve_web_chunks_impl(
                 "unique_domains": unique_domains[:8],
                 "missing_subquestions": next_missing,
                 "required_field_coverage": round(
-                    float(next_required_status.get("coverage", 1.0) or 0.0),
+                    next_coverage,
                     4,
                 ),
+                "required_field_coverage_target": coverage_target,
                 "required_fields_missing": next_missing_required_ids,
+                "target_domain_coverage_count": target_coverage_count,
             },
         )
         gap_iterations.append(
@@ -2995,15 +3855,24 @@ async def _aretrieve_web_chunks_impl(
                 "step": step,
                 "queries": loop_queries,
                 "llm_gap_queries": llm_gap_queries,
+                "actions": (
+                    ["search_web", "read_pages", "extract_evidence", "verify_coverage"]
+                    + (
+                        ["crawl_internal_links"]
+                        if int(crawl_summary.get("pages_fetched", 0) or 0) > 0
+                        else []
+                    )
+                ),
                 "follow_up_queries": next_follow_up_queries,
                 "missing_subquestions": next_missing,
                 "required_field_coverage": round(
-                    float(next_required_status.get("coverage", 1.0) or 0.0),
+                    next_coverage,
                     4,
                 ),
                 "required_fields_missing": next_missing_required_ids,
                 "unique_domains": unique_domains,
                 "unique_domain_count": len(unique_domains),
+                "target_domain_coverage_count": target_coverage_count,
             }
         )
         emit_trace_event(
@@ -3030,15 +3899,179 @@ async def _aretrieve_web_chunks_impl(
         final_domains,
     )
     final_missing_required_ids = list(final_required_field_status.get("missing_ids", []))
+    final_coverage = float(final_required_field_status.get("coverage", 1.0) or 0.0)
+    final_target_coverage_count = _target_domain_coverage_count(final_domains, target_domain_groups)
     final_verified = (
         (
             len(final_domains) >= _retrieval_min_unique_domains()
             and not final_missing_subquestions
             and not final_missing_required_ids
+            and final_coverage >= coverage_target
+            and (not enforce_target_domain_scope or final_target_coverage_count > 0)
         )
         if deep_mode
         else bool(results)
     )
+    if deep_mode and _required_field_rescue_enabled() and final_missing_required_ids:
+        rescue_missing_fields = _required_fields_by_ids(required_fields, final_missing_required_ids)
+        rescue_queries = _build_required_field_queries(
+            query,
+            missing_required_fields=rescue_missing_fields,
+            allowed_suffixes=allowed_suffixes,
+            unique_domains=final_domains,
+        )
+        rescue_queries = _next_queries_for_loop(
+            rescue_queries,
+            seen_queries,
+            max_queries=_required_field_rescue_max_queries(),
+        )
+        if rescue_queries:
+            emit_trace_event(
+                "required_field_rescue_started",
+                {
+                    "queries": rescue_queries,
+                    "missing_required_fields": final_missing_required_ids,
+                },
+            )
+            executed_queries.extend(rescue_queries)
+            rescue_search_started_at = time.perf_counter()
+            try:
+                rescue_payloads = await _asearch_payloads(rescue_queries, top_k=top_k)
+            except Exception as exc:
+                logger.warning("Required-field rescue search failed. %s", exc)
+                rescue_payloads = []
+            search_ms_total += _elapsed_ms(rescue_search_started_at)
+
+            rescue_rows, rescue_relaxed = _collect_search_rows_with_domain_retry(
+                rescue_payloads,
+                rescue_queries,
+                top_k=top_k,
+                allowed_suffixes=allowed_suffixes,
+                strict_official=strict_official_sources,
+                target_domain_groups=target_domain_groups,
+                enforce_target_domain_scope=enforce_target_domain_scope,
+            )
+            domain_filter_relaxed = domain_filter_relaxed or rescue_relaxed
+            rescue_fetch_started_at = time.perf_counter()
+            rescue_pages = await _afetch_organic_pages(rescue_rows) if rescue_rows else {}
+            fetch_ms_total += _elapsed_ms(rescue_fetch_started_at)
+            rescue_crawl_summary = {
+                "enabled": False,
+                "pages_fetched": 0,
+                "discovered_urls": 0,
+                "depth_reached": 0,
+            }
+            rescue_rows_for_candidates = list(rescue_rows)
+            if deep_mode and rescue_rows:
+                rescue_crawl_started_at = time.perf_counter()
+                rescue_crawl_rows, rescue_crawl_pages, rescue_crawl_summary = await _acrawl_internal_pages(
+                    seed_rows=rescue_rows,
+                    seed_page_data_by_url=rescue_pages,
+                    required_fields=rescue_missing_fields or required_fields,
+                    allowed_suffixes=allowed_suffixes,
+                    target_domain_groups=target_domain_groups,
+                    enforce_target_domain_scope=enforce_target_domain_scope,
+                )
+                fetch_ms_total += _elapsed_ms(rescue_crawl_started_at)
+                if rescue_crawl_pages:
+                    rescue_pages.update(rescue_crawl_pages)
+                if rescue_crawl_rows:
+                    rescue_rows_for_candidates = _dedupe_rows(
+                        rescue_rows + rescue_crawl_rows,
+                        limit=max(
+                            _max_context_results_for_mode() * 8,
+                            len(rescue_rows) + len(rescue_crawl_rows),
+                        ),
+                    )
+                emit_trace_event(
+                    "required_field_rescue_internal_crawl_completed",
+                    {
+                        "enabled": bool(rescue_crawl_summary.get("enabled", False)),
+                        "depth_reached": int(rescue_crawl_summary.get("depth_reached", 0) or 0),
+                        "pages_fetched": int(rescue_crawl_summary.get("pages_fetched", 0) or 0),
+                        "discovered_urls": int(rescue_crawl_summary.get("discovered_urls", 0) or 0),
+                        "urls": [str(row.get("url", "")).strip() for row in rescue_crawl_rows[:8]],
+                    },
+                )
+            if rescue_rows:
+                rescue_query_tokens = _query_tokens(" ".join(rescue_queries))
+                rescue_candidates = _build_organic_candidates(
+                    rows=rescue_rows_for_candidates,
+                    page_data_by_url=rescue_pages,
+                    query_tokens=rescue_query_tokens,
+                    allowed_suffixes=allowed_suffixes,
+                    strict_official=strict_official_sources,
+                    target_domain_groups=target_domain_groups,
+                    enforce_target_domain_scope=enforce_target_domain_scope,
+                )
+                rescue_ai_candidate = _ai_overview_candidate(rescue_payloads, allowed_suffixes)
+                if rescue_ai_candidate:
+                    rescue_candidates.append(rescue_ai_candidate)
+                rescue_candidates = _apply_trust_scores(rescue_candidates, allowed_suffixes)
+                all_candidates.extend(rescue_candidates)
+                all_candidates = _apply_trust_scores(all_candidates, allowed_suffixes)
+                all_facts = _extract_facts(
+                    all_candidates,
+                    limit=max(2, _max_context_results_for_mode() * 3),
+                )
+            results = _finalize_candidates(all_candidates)
+            extracted_facts = _extract_facts(
+                results,
+                limit=_max_context_results_for_mode(),
+            )
+            final_domains = _unique_domains_from_candidates(results)
+            final_required_field_status = _required_field_coverage(required_fields, results)
+            final_missing_subquestions = _combine_missing_subquestions(
+                list(_identify_missing_subquestions(subquestions, extracted_facts))
+                + list(final_required_field_status.get("missing_subquestions", [])),
+                final_domains,
+            )
+            final_missing_required_ids = list(final_required_field_status.get("missing_ids", []))
+            final_coverage = float(final_required_field_status.get("coverage", 1.0) or 0.0)
+            final_target_coverage_count = _target_domain_coverage_count(
+                final_domains, target_domain_groups
+            )
+            final_verified = (
+                (
+                    len(final_domains) >= _retrieval_min_unique_domains()
+                    and not final_missing_subquestions
+                    and not final_missing_required_ids
+                    and final_coverage >= coverage_target
+                    and (not enforce_target_domain_scope or final_target_coverage_count > 0)
+                )
+                if deep_mode
+                else bool(results)
+            )
+            gap_iterations.append(
+                {
+                    "step": "required_field_rescue",
+                    "queries": rescue_queries,
+                    "actions": (
+                        ["search_web", "read_pages", "extract_evidence", "verify_coverage"]
+                        + (
+                            ["crawl_internal_links"]
+                            if int(rescue_crawl_summary.get("pages_fetched", 0) or 0) > 0
+                            else []
+                        )
+                    ),
+                    "missing_subquestions": final_missing_subquestions,
+                    "required_field_coverage": round(final_coverage, 4),
+                    "required_fields_missing": final_missing_required_ids,
+                    "unique_domains": final_domains,
+                    "unique_domain_count": len(final_domains),
+                    "target_domain_coverage_count": final_target_coverage_count,
+                }
+            )
+            emit_trace_event(
+                "required_field_rescue_completed",
+                {
+                    "result_count": len(results),
+                    "required_field_coverage": round(final_coverage, 4),
+                    "required_field_coverage_target": coverage_target,
+                    "required_fields_missing": final_missing_required_ids,
+                    "target_domain_coverage_count": final_target_coverage_count,
+                },
+            )
     emit_trace_event(
         "source_ranking_completed",
         {
@@ -3046,11 +4079,10 @@ async def _aretrieve_web_chunks_impl(
             "facts": extracted_facts,
             "unique_domain_count": len(final_domains),
             "unique_domains": final_domains[:8],
-            "required_field_coverage": round(
-                float(final_required_field_status.get("coverage", 1.0) or 0.0),
-                4,
-            ),
+            "required_field_coverage": round(final_coverage, 4),
+            "required_field_coverage_target": coverage_target,
             "required_fields_missing": final_missing_required_ids,
+            "target_domain_coverage_count": final_target_coverage_count,
             "urls": [
                 str((item.get("metadata") or {}).get("url", "")).strip()
                 for item in results[:8]
@@ -3080,14 +4112,16 @@ async def _aretrieve_web_chunks_impl(
             "unique_domains": final_domains,
             "unique_domain_count": len(final_domains),
             "missing_subquestions": final_missing_subquestions,
-            "required_field_coverage": round(
-                float(final_required_field_status.get("coverage", 1.0) or 0.0),
-                4,
-            ),
+            "required_field_coverage": round(final_coverage, 4),
+            "required_field_coverage_target": coverage_target,
             "required_fields": final_required_field_status.get("fields", []),
             "required_fields_missing": final_missing_required_ids,
             "required_field_labels_missing": final_required_field_status.get("missing_labels", []),
             "verified": final_verified,
+            "strict_official_sources": strict_official_sources,
+            "target_domain_groups": target_domain_groups,
+            "target_domain_scope_enforced": enforce_target_domain_scope,
+            "target_domain_coverage_count": final_target_coverage_count,
         },
         "facts": extracted_facts,
         "retrieval_strategy": (

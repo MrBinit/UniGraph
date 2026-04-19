@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 from app.core.config import get_settings
 from app.core.paths import resolve_project_path
-from app.repositories.document_chunk_repository import ingest_embedding_manifest
 
 settings = get_settings()
 
@@ -22,6 +21,10 @@ def _load_embedding_manifest(path: Path) -> dict:
 
 def ingest_embedding_manifest_file(path: Path) -> int:
     """Load one embedding manifest file and ingest its chunks into Postgres."""
+    if not settings.postgres.enabled:
+        return 0
+    from app.repositories.document_chunk_repository import ingest_embedding_manifest
+
     payload = _load_embedding_manifest(path)
     return ingest_embedding_manifest(payload)
 

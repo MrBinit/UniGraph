@@ -2,16 +2,19 @@ web_search:
   enabled: true
   google_search_url: "https://api.tavily.com/search"
   engine: "tavily"
-  search_depth: "basic"
+  search_depth: "advanced"
   api_key_env_name: "TAVILY_WEB_SEARCH"
   default_gl: "us"
   default_hl: "en"
-  default_num: 3
+  default_num: 8
   timeout_seconds: 6.0
+  fast_timeout_seconds: 18.0
+  deep_timeout_seconds: 110.0
   max_concurrency: 4
   queue_workers: 4
   queue_max_size: 200
-  always_web_retrieval_enabled: false
+  response_cache_enabled: false
+  always_web_retrieval_enabled: true
   retrieval_fanout_enabled: true
   fallback_enabled: true
   fallback_similarity_threshold: 0.20
@@ -22,19 +25,27 @@ web_search:
   query_planner_acquire_timeout_seconds: 2.5
   query_planner_cache_enabled: true
   query_planner_cache_ttl_seconds: 300
-  query_planner_max_queries: 5
-  query_planner_max_subquestions: 5
+  query_planner_max_queries: 6
+  query_planner_max_subquestions: 6
   retrieval_loop_enabled: true
   retrieval_loop_use_llm: true
   retrieval_loop_model_id: "us.anthropic.claude-opus-4-6-v1"
   retrieval_loop_acquire_timeout_seconds: 2.5
   retrieval_loop_cache_enabled: true
   retrieval_loop_cache_ttl_seconds: 180
-  retrieval_loop_max_steps: 2
-  retrieval_loop_max_gap_queries: 3
+  retrieval_loop_max_steps: 4
+  retrieval_loop_max_gap_queries: 4
+  deep_required_field_rescue_enabled: true
+  deep_required_field_rescue_max_queries: 10
+  agentic_required_field_rescue_max_rounds: 2
+  deep_internal_crawl_enabled: true
+  deep_internal_crawl_max_depth: 2
+  deep_internal_crawl_max_pages: 10
+  deep_internal_crawl_links_per_page: 12
+  deep_internal_crawl_per_parent_limit: 4
   retrieval_min_unique_domains: 1
   deep_min_unique_domains: 2
-  retrieval_gap_min_token_coverage: 0.5
+  retrieval_gap_min_token_coverage: 0.65
   multi_query_enabled: true
   max_query_variants: 3
   deep_max_query_variants: 5
@@ -45,19 +56,19 @@ web_search:
   official_source_allowlist:
     - "daad.de"
   max_context_results: 4
-  deep_max_context_results: 10
-  deep_default_num: 8
+  deep_max_context_results: 12
+  deep_default_num: 10
   fetch_page_content: true
   max_pages_to_fetch: 2
-  deep_max_pages_to_fetch: 6
-  page_fetch_timeout_seconds: 6.0
+  deep_max_pages_to_fetch: 8
+  page_fetch_timeout_seconds: 8.0
   max_page_chars: 2800
   strip_boilerplate: true
   min_clean_line_chars: 8
   page_chunk_chars: 850
   page_chunk_overlap_chars: 120
   max_chunks_per_page: 2
-  deep_max_chunks_per_page: 4
+  deep_max_chunks_per_page: 6
   min_chunk_chars: 140
   chunk_dedupe_similarity: 0.9
   trust_relevance_weight: 0.6
@@ -65,8 +76,10 @@ web_search:
   trust_recency_weight: 0.1
   trust_agreement_weight: 0.1
   deep_cache_min_confidence: 0.7
+  deep_answer_min_confidence: 0.72
+  deep_required_field_min_coverage: 0.9
   deep_cache_min_required_field_coverage: 0.85
   deep_cache_min_source_count: 2
   cache_max_not_verified_mentions: 3
-  retry_max_attempts: 1
-  retry_base_backoff_seconds: 0.2
+  retry_max_attempts: 3
+  retry_base_backoff_seconds: 0.4

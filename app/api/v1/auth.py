@@ -1,11 +1,14 @@
+import json
+import hmac
 import logging
+import os
+from functools import lru_cache
 
 from fastapi import APIRouter, HTTPException, status
 
 from app.core.config import get_settings
 from app.core.passwords import verify_password
 from app.core.security import create_access_token
-from app.repositories.auth_user_repository import get_auth_user_by_username
 from app.schemas.auth_schema import PasswordLoginRequest, PasswordLoginResponse
 
 router = APIRouter()
@@ -33,18 +36,59 @@ def _normalize_user_roles(user: dict) -> list[str]:
     return _normalize_roles(user.get("roles"))
 
 
+def _normalize_auth_user(user: dict) -> dict | None:
+    if not isinstance(user, dict):
+        return None
+    username = str(user.get("username", "")).strip()
+    if not username:
+        return None
+    normalized = dict(user)
+    normalized["username"] = username
+    return normalized
+
+
+@lru_cache(maxsize=1)
+def _configured_auth_users() -> list[dict]:
+    raw = os.getenv("SECURITY_LOGIN_USERS_JSON", "").strip()
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except Exception as exc:
+        logger.warning("SECURITY_LOGIN_USERS_JSON is invalid JSON. %s", exc)
+        return []
+    if not isinstance(payload, list):
+        logger.warning("SECURITY_LOGIN_USERS_JSON must be a JSON array of users.")
+        return []
+    users: list[dict] = []
+    for item in payload:
+        normalized = _normalize_auth_user(item)
+        if normalized is not None:
+            users.append(normalized)
+    return users
+
+
+def _password_matches(user: dict, plaintext_password: str) -> bool:
+    password_hash = str(user.get("password_hash", "")).strip()
+    if password_hash and verify_password(plaintext_password, password_hash):
+        return True
+    # Backward compatibility for deployments storing plaintext passwords in SECURITY_LOGIN_USERS_JSON.
+    plaintext = str(user.get("password", "")).strip()
+    if plaintext:
+        return hmac.compare_digest(str(plaintext_password), plaintext)
+    return False
+
+
 def _fetch_auth_user(username: str) -> dict | None:
     target = str(username).strip()
     if not target:
         return None
-    if not settings.postgres.enabled:
-        logger.warning("Postgres-backed login is configured but postgres.enabled=false.")
-        return None
-    try:
-        return get_auth_user_by_username(target)
-    except Exception as exc:
-        logger.warning("Auth user lookup failed for username=%s. %s", target, exc)
-        return None
+    target_key = target.lower()
+    for user in _configured_auth_users():
+        username_value = str(user.get("username", "")).strip().lower()
+        if username_value == target_key:
+            return user
+    return None
 
 
 @router.post("/auth/login", response_model=PasswordLoginResponse)
@@ -63,10 +107,7 @@ async def password_login(request: PasswordLoginRequest):
             detail=_INVALID_CREDENTIALS_DETAIL,
         )
 
-    configured_password_hash = str(user.get("password_hash", "")).strip()
-    if not configured_password_hash or not verify_password(
-        request.password, configured_password_hash
-    ):
+    if not _password_matches(user, request.password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=_INVALID_CREDENTIALS_DETAIL,

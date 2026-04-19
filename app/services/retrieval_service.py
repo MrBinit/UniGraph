@@ -1,15 +1,12 @@
 import logging
 import time
 
-from app.repositories.document_chunk_repository import (
-    resolve_document_chunk_search_strategy,
-    search_document_chunks,
-    search_document_chunks_async,
-)
+from app.core.config import get_settings
 from app.infra.io_limiters import dependency_limiter
 from app.services.embedding_service import aembed_text, embed_text
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 
 def _elapsed_ms(started_at: float) -> int:
@@ -63,6 +60,22 @@ def retrieve_document_chunks(
 ) -> dict:
     """Embed a query, run retrieval, and return results with latency breakdowns."""
     started_at = time.perf_counter()
+    if not settings.postgres.enabled:
+        return _build_retrieval_response(
+            query=query,
+            top_k=top_k,
+            metadata_filters=metadata_filters,
+            retrieval_strategy="postgres_disabled",
+            embedding_ms=0,
+            db_ms=0,
+            started_at=started_at,
+            results=[],
+        )
+    from app.repositories.document_chunk_repository import (
+        resolve_document_chunk_search_strategy,
+        search_document_chunks,
+    )
+
     retrieval_strategy = resolve_document_chunk_search_strategy(metadata_filters)
 
     embedding_started_at = time.perf_counter()
@@ -96,6 +109,22 @@ async def aretrieve_document_chunks(
 ) -> dict:
     """Embed a query, run async retrieval, and return results with latency breakdowns."""
     started_at = time.perf_counter()
+    if not settings.postgres.enabled:
+        return _build_retrieval_response(
+            query=query,
+            top_k=top_k,
+            metadata_filters=metadata_filters,
+            retrieval_strategy="postgres_disabled",
+            embedding_ms=0,
+            db_ms=0,
+            started_at=started_at,
+            results=[],
+        )
+    from app.repositories.document_chunk_repository import (
+        resolve_document_chunk_search_strategy,
+        search_document_chunks_async,
+    )
+
     retrieval_strategy = resolve_document_chunk_search_strategy(metadata_filters)
 
     embedding_started_at = time.perf_counter()

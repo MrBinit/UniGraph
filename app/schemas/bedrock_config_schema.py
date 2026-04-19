@@ -4,6 +4,15 @@ from pydantic import BaseModel, Field
 class BedrockConfig(BaseModel):
     primary_model_id: str
     fallback_model_id: str
+    planner_model_id: str = ""
+    planner_fallback_model_id: str = ""
+    worker_model_id: str = ""
+    worker_fallback_model_id: str = ""
+    worker_escalation_model_id: str = ""
+    verifier_model_id: str = ""
+    verifier_fallback_model_id: str = ""
+    finalizer_model_id: str = ""
+    finalizer_fallback_model_id: str = ""
     timeout: int = Field(ge=1, le=120)
     max_concurrency: int = Field(ge=1, le=1000)
     web_grounding_enabled: bool = False

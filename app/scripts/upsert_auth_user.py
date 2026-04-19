@@ -1,8 +1,9 @@
 import argparse
 import getpass
+import json
+import os
 
 from app.core.passwords import hash_password
-from app.repositories.auth_user_repository import upsert_auth_user
 
 
 def _parsed_roles(raw: str) -> list[str]:
@@ -17,8 +18,26 @@ def _resolve_password(args) -> str:
     return getpass.getpass(f"Password for {prompt_user}: ").strip()
 
 
+def _load_existing_users() -> list[dict]:
+    raw = os.getenv("SECURITY_LOGIN_USERS_JSON", "").strip()
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return []
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    return []
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Create or update a Postgres-backed auth user.")
+    parser = argparse.ArgumentParser(
+        description=(
+            "Create or update an auth user entry for SECURITY_LOGIN_USERS_JSON "
+            "(Postgres auth was removed)."
+        )
+    )
     parser.add_argument("--username", required=True, help="Login username.")
     parser.add_argument(
         "--user-id",
@@ -46,14 +65,24 @@ def main() -> None:
     if not password:
         raise RuntimeError("password is required.")
 
-    upsert_auth_user(
-        username=username,
-        user_id=user_id,
-        password_hash=hash_password(password),
-        roles=_parsed_roles(args.roles),
-        is_active=not bool(args.inactive),
-    )
-    print(f"OK | upserted auth user | username={username} | user_id={user_id}")
+    users = _load_existing_users()
+    users_by_name = {
+        str(item.get("username", "")).strip().lower(): item
+        for item in users
+        if str(item.get("username", "")).strip()
+    }
+    users_by_name[username.lower()] = {
+        "username": username,
+        "user_id": user_id,
+        "password_hash": hash_password(password),
+        "roles": _parsed_roles(args.roles),
+        "is_active": not bool(args.inactive),
+    }
+
+    merged = sorted(users_by_name.values(), key=lambda item: str(item.get("username", "")).lower())
+    serialized = json.dumps(merged, separators=(",", ":"))
+    print("Updated SECURITY_LOGIN_USERS_JSON value:")
+    print(serialized)
 
 
 if __name__ == "__main__":

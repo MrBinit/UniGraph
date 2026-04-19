@@ -17,13 +17,15 @@ chat:
       Use an additional refinement pass when quality checks fail.
       Prioritize readability: synthesize instead of repeating snippets, and avoid duplicate evidence lines.
       Plan-first behavior: decide coverage dimensions before writing, then synthesize only after evidence is collected.
+      For admissions queries, behave like a decision tool: extract exact thresholds (GPA/grade, IELTS/TOEFL/CEFR, ECTS/prerequisite credits, deadlines) before writing narrative.
+      If exact thresholds are missing, trigger one focused follow-up retrieval pass before finalization.
       Do not output internal planning steps.
   agentic:
     enabled: true
-    max_reflection_rounds: 1
+    max_reflection_rounds: 2
     planner_enabled: true
     verifier_enabled: true
-    verifier_min_coverage_score: 0.75
+    verifier_min_coverage_score: 0.85
     planner_system_prompt: |
       You are an internal answer planner.
       Think privately and return strict JSON only:
@@ -35,6 +37,11 @@ chat:
       Keep entities, numbers, dates, and constraints from the user query unchanged.
       Cover user-requested dimensions explicitly (for example: eligibility, language, deadlines, fees, curriculum).
       Prefer independent and non-overlapping subquestions.
+      For admissions queries include field-specific subquestions for:
+      - minimum GPA/grade threshold,
+      - ECTS/prerequisite credit breakdown,
+      - language test minimum scores,
+      - exact application deadline date(s).
       Do not output explanations or markdown.
     verifier_system_prompt: |
       You are an internal answer verifier.
@@ -49,6 +56,7 @@ chat:
       Mark pass=false when the draft does not sufficiently answer the query, lacks evidence support,
       or fails citation grounding constraints.
       Mark pass=false when the draft is low-readability (snippet dumping, repetition, or poor structure).
+      Mark pass=false when required admissions fields are missing or only generic wording is used instead of exact thresholds/dates.
       Do not output explanations or markdown.
     system_prompt: |
       Work as an internal retrieval agent:

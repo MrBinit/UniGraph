@@ -1,9 +1,23 @@
 from __future__ import annotations
 
+import json
 import logging
+import os
+import time
 from datetime import datetime, timezone
 from statistics import mean
 from uuid import uuid4
+
+try:
+    import boto3
+    from boto3.dynamodb.types import TypeDeserializer
+except Exception:  # pragma: no cover - boto3 optional in minimal test envs
+    boto3 = None
+    TypeDeserializer = None
+try:
+    from botocore.config import Config as BotoConfig
+except Exception:  # pragma: no cover - botocore optional in minimal test envs
+    BotoConfig = None
 
 from app.core.config import get_settings
 from app.core.memory_crypto import decrypt_memory_payload, encrypt_memory_payload
@@ -17,6 +31,7 @@ from app.services.quality_metrics_service import (
 
 settings = get_settings()
 logger = logging.getLogger(__name__)
+_ddb_deserializer = TypeDeserializer() if TypeDeserializer is not None else None
 
 MAX_STORED_CONVERSATIONS = 500
 
@@ -54,6 +69,212 @@ def _safe_payload_results(results: list[dict] | None) -> list[dict]:
             }
         )
     return safe_results
+
+
+def _dynamodb_region_name() -> str | None:
+    return (
+        os.getenv("AWS_REGION", "").strip()
+        or os.getenv("AWS_DEFAULT_REGION", "").strip()
+        or os.getenv("AWS_SECRETS_MANAGER_REGION", "").strip()
+        or None
+    )
+
+
+def _dynamodb_client():
+    if boto3 is None:
+        return None
+    kwargs = {"region_name": _dynamodb_region_name()} if _dynamodb_region_name() else {}
+    if BotoConfig is not None:
+        kwargs["config"] = BotoConfig(
+            connect_timeout=1,
+            read_timeout=3,
+            retries={"max_attempts": 1, "mode": "standard"},
+        )
+    return boto3.client("dynamodb", **kwargs)
+
+
+def _deserialize_dynamodb_item(item: dict) -> dict:
+    if not isinstance(item, dict) or _ddb_deserializer is None:
+        return {}
+    try:
+        return {key: _ddb_deserializer.deserialize(value) for key, value in item.items()}
+    except Exception:
+        return {}
+
+
+def _coerce_int(value, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _coerce_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _evidence_urls_from_metrics_row(row: dict) -> list[str]:
+    raw = str(row.get("retrieval_evidence_json", "")).strip()
+    if not raw:
+        return []
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(payload, list):
+        return []
+    urls: list[str] = []
+    seen: set[str] = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        candidate = str(item.get("source_path", "")).strip()
+        if not candidate:
+            metadata = item.get("metadata")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            candidate = str(metadata.get("url", "")).strip()
+        if not candidate:
+            continue
+        key = candidate.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        urls.append(candidate)
+        if len(urls) >= 12:
+            break
+    return urls
+
+
+def _trace_from_metrics_row(row: dict) -> dict | None:
+    if not isinstance(row, dict):
+        return None
+    prompt = str(row.get("query", "")).strip()
+    answer = str(row.get("answer", "")).strip()
+    if not prompt and not answer:
+        return None
+    created_at = str(row.get("timestamp", "")).strip() or datetime.now(timezone.utc).isoformat()
+    conversation_id = str(row.get("request_id", "")).strip() or uuid4().hex
+    retrieval_result_count = max(0, _coerce_int(row.get("retrieval_result_count"), 0))
+    evidence_urls = _evidence_urls_from_metrics_row(row)
+    reconstructed_results = [
+        {
+            "chunk_id": f"ddb:{index}",
+            "source_path": url,
+            "metadata": {"url": url},
+            "content": "",
+        }
+        for index, url in enumerate(evidence_urls, start=1)
+    ]
+    return {
+        "conversation_id": conversation_id,
+        "user_id": str(row.get("user_id", "")).strip(),
+        "prompt": prompt,
+        "answer": answer,
+        "created_at": created_at,
+        "retrieval_strategy": str(row.get("retrieval_strategy", "")).strip(),
+        "retrieved_results": reconstructed_results,
+        "retrieval_result_count": retrieval_result_count,
+        "quality": {
+            "groundedness": _coerce_float(row.get("groundedness"), 0.0),
+            "citation_accuracy": _coerce_float(row.get("citation_accuracy"), 0.0),
+        },
+        "evidence_urls": evidence_urls,
+        "labels": {
+            "expected_answer": None,
+            "relevant_chunk_ids": [],
+            "user_feedback": None,
+            "user_feedback_score": None,
+        },
+        "_trace_source": "dynamodb_metrics",
+    }
+
+
+def _list_chat_traces_from_dynamodb(user_id: str, *, limit: int = 20) -> list[dict]:
+    if limit <= 0:
+        return []
+    if not bool(settings.app.metrics_dynamodb_enabled):
+        return []
+    table_name = str(settings.app.metrics_dynamodb_requests_table or "").strip()
+    if not table_name:
+        return []
+    client = _dynamodb_client()
+    if client is None:
+        return []
+
+    max_pages = 2
+    page_size = min(200, max(25, limit * 3))
+    deadline = time.monotonic() + 5.0
+    collected_items: list[dict] = []
+    start_key = None
+    for _ in range(max_pages):
+        if time.monotonic() >= deadline:
+            break
+        params = {
+            "TableName": table_name,
+            "Limit": page_size,
+            "FilterExpression": "#uid = :uid",
+            "ExpressionAttributeNames": {
+                "#uid": "user_id",
+                "#ts": "timestamp",
+                "#query": "query",
+                "#ans": "answer",
+            },
+            "ExpressionAttributeValues": {
+                ":uid": {"S": str(user_id)},
+            },
+            "ProjectionExpression": (
+                "request_id,#ts,#uid,#query,#ans,retrieval_strategy,retrieval_result_count,"
+                "groundedness,citation_accuracy,retrieval_evidence_json,outcome"
+            ),
+        }
+        if start_key:
+            params["ExclusiveStartKey"] = start_key
+        try:
+            response = client.scan(**params)
+        except Exception as exc:
+            logger.warning("DynamoDB scan for chat traces failed for user=%s. %s", user_id, exc)
+            break
+        items = response.get("Items", [])
+        if isinstance(items, list):
+            collected_items.extend(items)
+        start_key = response.get("LastEvaluatedKey")
+        if not start_key:
+            break
+        if len(collected_items) >= max(limit * 5, 120):
+            break
+
+    rows = [_deserialize_dynamodb_item(item) for item in collected_items]
+    filtered_rows: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("user_id", "")).strip() != str(user_id):
+            continue
+        outcome = str(row.get("outcome", "")).strip().lower()
+        if outcome and outcome != "success":
+            continue
+        if not str(row.get("answer", "")).strip():
+            continue
+        filtered_rows.append(row)
+    filtered_rows.sort(key=lambda row: str(row.get("timestamp", "")).strip(), reverse=True)
+
+    traces: list[dict] = []
+    seen_ids: set[str] = set()
+    for row in filtered_rows:
+        trace = _trace_from_metrics_row(row)
+        if not trace:
+            continue
+        conversation_id = str(trace.get("conversation_id", "")).strip()
+        if not conversation_id or conversation_id in seen_ids:
+            continue
+        seen_ids.add(conversation_id)
+        traces.append(trace)
+        if len(traces) >= limit:
+            break
+    return traces
 
 
 def store_chat_trace(
@@ -128,6 +349,20 @@ def _load_trace(conversation_id: str, *, redis=None) -> dict | None:
 
 def list_chat_traces(user_id: str, *, limit: int = 20, redis=None) -> list[dict]:
     """Load up to `limit` recent chat traces for a user."""
+    if redis is None:
+        try:
+            ddb_traces = _list_chat_traces_from_dynamodb(user_id, limit=limit)
+        except Exception as exc:
+            logger.warning("Failed to load DynamoDB chat traces for user=%s. %s", user_id, exc)
+            ddb_traces = []
+        if ddb_traces:
+            logger.info(
+                "Loaded %s conversation traces from DynamoDB for user=%s.",
+                len(ddb_traces),
+                user_id,
+            )
+            return ddb_traces
+
     client = redis or redis_client
     user_index_key = _user_conversation_index_key(user_id)
 
@@ -135,7 +370,7 @@ def list_chat_traces(user_id: str, *, limit: int = 20, redis=None) -> list[dict]
         conversation_ids = client.lrange(user_index_key, 0, max(0, limit - 1))
     except Exception as exc:
         logger.warning("Failed to list chat traces for user=%s. %s", user_id, exc)
-        return []
+        conversation_ids = []
 
     traces: list[dict] = []
     for conversation_id in conversation_ids:

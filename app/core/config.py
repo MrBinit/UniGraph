@@ -239,6 +239,11 @@ def _apply_env_overrides(data: dict) -> dict:
         int,
     )
     _set(
+        ["web_search", "agentic_required_field_rescue_max_rounds"],
+        "WEB_SEARCH_AGENTIC_REQUIRED_FIELD_RESCUE_MAX_ROUNDS",
+        int,
+    )
+    _set(
         ["web_search", "retrieval_min_unique_domains"],
         "WEB_SEARCH_RETRIEVAL_MIN_UNIQUE_DOMAINS",
         int,

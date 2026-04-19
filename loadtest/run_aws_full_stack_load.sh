@@ -83,7 +83,7 @@ export REDIS_WORKER_TLS="${REDIS_WORKER_TLS:-true}"
 export REDIS_APP_SSL_CERT_REQS="${REDIS_APP_SSL_CERT_REQS:-required}"
 export REDIS_WORKER_SSL_CERT_REQS="${REDIS_WORKER_SSL_CERT_REQS:-required}"
 
-export POSTGRES_ENABLED="${POSTGRES_ENABLED:-true}"
+export POSTGRES_ENABLED="${POSTGRES_ENABLED:-false}"
 export RETRIEVAL_DISABLED="${RETRIEVAL_DISABLED:-false}"
 export LLM_MOCK_MODE="${LLM_MOCK_MODE:-true}"
 export EMBEDDING_MOCK_MODE="${EMBEDDING_MOCK_MODE:-true}"
@@ -161,12 +161,16 @@ then
 fi
 tail -n 40 /tmp/ai-system-aws-load-preflight.log || true
 
-if ! ./venv/bin/python -m app.scripts.check_postgres >/tmp/ai-system-aws-load-postgres.log 2>&1; then
-  echo "[aws-load] postgres connectivity failed:"
-  tail -n 120 /tmp/ai-system-aws-load-postgres.log || true
-  exit 1
+if [[ "$(printf '%s' "${POSTGRES_ENABLED}" | tr '[:upper:]' '[:lower:]')" == "true" ]]; then
+  if ! ./venv/bin/python -m app.scripts.check_postgres >/tmp/ai-system-aws-load-postgres.log 2>&1; then
+    echo "[aws-load] postgres connectivity failed:"
+    tail -n 120 /tmp/ai-system-aws-load-postgres.log || true
+    exit 1
+  fi
+  tail -n 10 /tmp/ai-system-aws-load-postgres.log || true
+else
+  echo "[aws-load] postgres connectivity check skipped (POSTGRES_ENABLED=false)"
 fi
-tail -n 10 /tmp/ai-system-aws-load-postgres.log || true
 
 if lsof -nP -iTCP:"${API_PORT}" -sTCP:LISTEN >/dev/null 2>&1; then
   echo "[aws-load] port ${API_PORT} is already in use; choose another API_PORT."

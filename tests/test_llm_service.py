@@ -51,6 +51,11 @@ def _disable_always_web_hybrid_by_default(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _enable_response_cache_by_default_for_tests(monkeypatch):
+    monkeypatch.setattr(llm_service.settings.web_search, "response_cache_enabled", True)
+
+
+@pytest.fixture(autouse=True)
 def _disable_agentic_planner_verifier_by_default(monkeypatch):
     monkeypatch.setattr(llm_service, "_agentic_planner_enabled", lambda: False)
     monkeypatch.setattr(llm_service, "_agentic_verifier_enabled", lambda: False)
@@ -106,6 +111,36 @@ async def test_generate_response_returns_cache_hit(monkeypatch):
 
     result = await llm_service.generate_response("user-1", "find ai professor")
     assert result == "from-cache"
+
+
+@pytest.mark.asyncio
+async def test_generate_response_bypasses_cache_when_response_cache_disabled(monkeypatch):
+    monkeypatch.setattr(llm_service.settings.web_search, "response_cache_enabled", False)
+    fake_redis = FakeRedis()
+    cache_key = llm_service._chat_cache_key("user-1", "find ai professor")
+    fake_redis.store[cache_key] = "from-cache"
+    _attach_fake_redis(monkeypatch, fake_redis)
+
+    async def fake_build_context(_user_id, user_prompt):
+        return [{"role": "user", "content": user_prompt}]
+
+    async def fake_primary(_messages):
+        return FakeResponse("fresh-response")
+
+    async def fake_update_memory(*_args, **_kwargs):
+        return None
+
+    async def fake_retrieve_document_chunks(*_args, **_kwargs):
+        return {"results": []}
+
+    monkeypatch.setattr(llm_service, "build_context", fake_build_context)
+    monkeypatch.setattr(llm_service, "_call_primary", fake_primary)
+    monkeypatch.setattr(llm_service, "update_memory", fake_update_memory)
+    monkeypatch.setattr(llm_service, "aretrieve_document_chunks", fake_retrieve_document_chunks)
+
+    result = await llm_service.generate_response("user-1", "find ai professor")
+    assert result == "fresh-response"
+    assert fake_redis.store[cache_key] == "from-cache"
 
 
 @pytest.mark.asyncio
@@ -490,6 +525,13 @@ async def test_generate_response_returns_best_partial_when_verification_never_pa
             '"missing_points":["deadlines","fees","requirements"],'
             '"revision_guidance":"Needs substantially more detail."}'
         ),
+        FakeResponse("Insufficient details. Sources: https://example.edu/evidence"),
+        FakeResponse(
+            '{"pass":false,"coverage_score":0.22,'
+            '"issues":["still missing key details"],'
+            '"missing_points":["deadlines","fees","requirements"],'
+            '"revision_guidance":"Insufficient evidence to complete."}'
+        ),
     ]
     model_calls = {"count": 0}
 
@@ -520,7 +562,111 @@ async def test_generate_response_returns_best_partial_when_verification_never_pa
 
     assert result.startswith("Partial comparison with one verified detail.")
     assert result != llm_service._NO_RELEVANT_INFORMATION_DETAIL
-    assert model_calls["count"] == 5
+    assert model_calls["count"] == 7
+
+
+def test_targeted_required_field_rescue_queries_include_site_and_field_focus():
+    state = {
+        "query_intent": "fact_lookup",
+        "required_answer_fields": [
+            "application_deadline",
+            "application_portal",
+            "language_test_score_thresholds",
+        ],
+        "required_fields_missing": ["application_deadline"],
+        "web_required_fields_missing": ["application_portal"],
+        "evidence_urls": ["https://www.uni-mannheim.de/studium/bewerbung/"],
+    }
+    queries = llm_service._targeted_required_field_rescue_queries(
+        base_query="University of Mannheim MSc Business Informatics admission requirements",
+        state=state,
+        issues=["missing_required_answer_fields", "web_missing:application_portal"],
+    )
+    assert queries
+    assert any("site:uni-mannheim.de" in query.lower() for query in queries)
+    assert any("deadline" in query.lower() for query in queries)
+    assert any("portal" in query.lower() for query in queries)
+
+
+def test_targeted_required_field_rescue_queries_infer_site_hint_from_query_without_evidence():
+    state = {
+        "query_intent": "fact_lookup",
+        "required_answer_fields": ["application_deadline", "application_portal"],
+        "required_fields_missing": ["application_deadline"],
+        "web_required_fields_missing": ["application_portal"],
+        "evidence_urls": [],
+        "safe_user_prompt": (
+            "Tell me about University of Mannheim MSc Business Informatics including "
+            "deadline and where to apply"
+        ),
+    }
+    queries = llm_service._targeted_required_field_rescue_queries(
+        base_query="University of Mannheim MSc Business Informatics admission requirements",
+        state=state,
+        issues=["web_missing:application_portal"],
+    )
+    assert queries
+    assert any("site:uni-mannheim.de" in query.lower() for query in queries)
+
+
+@pytest.mark.asyncio
+async def test_generate_agentic_answer_runs_required_field_rescue_extra_round(monkeypatch):
+    monkeypatch.setattr(llm_service, "_web_retrieval_ready", lambda: (True, "ready"))
+    monkeypatch.setattr(llm_service, "_agentic_required_field_rescue_max_rounds", lambda: 1)
+
+    async def fake_finalize_candidate_with_llm(**_kwargs):
+        return "", {}, 0
+
+    monkeypatch.setattr(llm_service, "_finalize_candidate_with_llm", fake_finalize_candidate_with_llm)
+
+    worker_calls = {"count": 0}
+    rescue_calls = {"count": 0}
+
+    async def fake_call_model_with_fallback(_messages, _state, role="worker", attempt=1):
+        _ = attempt
+        assert role == "worker"
+        worker_calls["count"] += 1
+        if worker_calls["count"] == 1:
+            return FakeResponse("I could not verify this from current evidence.")
+        return FakeResponse("Application deadline: 31 May 2026.")
+
+    async def fake_required_field_rescue(*, issues, state, base_query, search_mode):
+        _ = state
+        assert "missing_required_answer_fields" in issues
+        assert "deadline" in base_query.lower()
+        assert search_mode == "deep"
+        rescue_calls["count"] += 1
+        return ([{"role": "system", "content": "Rescue retrieval context"}], True)
+
+    monkeypatch.setattr(llm_service, "_call_model_with_fallback", fake_call_model_with_fallback)
+    monkeypatch.setattr(llm_service, "_attempt_required_field_web_rescue", fake_required_field_rescue)
+
+    state = llm_service._new_metrics_state()
+    state.update(
+        {
+            "safe_user_prompt": "Tell me the application deadline for this program",
+            "query_intent": "deadline",
+            "required_answer_fields": ["application_deadline"],
+        }
+    )
+    policy = {
+        "max_attempts": 1,
+        "planner_enabled": False,
+        "verifier_enabled": False,
+        "web_search_mode": "deep",
+        "mode": "deep",
+    }
+
+    result, _usage = await llm_service._generate_agentic_answer(
+        user_id="user-1",
+        messages=[{"role": "user", "content": "deadline?"}],
+        policy=policy,
+        state=state,
+    )
+    assert result == "Application deadline: 31 May 2026."
+    assert worker_calls["count"] == 2
+    assert rescue_calls["count"] == 1
+    assert state["agent_required_field_rescue_rounds"] == 1
 
 
 @pytest.mark.asyncio
@@ -1201,6 +1347,41 @@ async def test_generate_response_returns_sorry_when_web_fallback_has_no_results(
 
 
 @pytest.mark.asyncio
+async def test_generate_response_returns_timeout_detail_when_web_retrieval_times_out(monkeypatch):
+    monkeypatch.setenv("WEB_SEARCH_API_KEY", "test-key")
+    monkeypatch.setattr(llm_service.settings.web_search, "enabled", True)
+    monkeypatch.setattr(llm_service.settings.web_search, "fallback_enabled", True)
+
+    fake_redis = FakeRedis()
+    _attach_fake_redis(monkeypatch, fake_redis)
+
+    async def fake_build_context(_user_id, user_prompt):
+        return [{"role": "user", "content": user_prompt}]
+
+    async def should_not_call_model(_messages):
+        raise AssertionError("model should not run when retrieval times out with no evidence")
+
+    async def fake_update_memory(*_args, **_kwargs):
+        return None
+
+    async def fake_retrieve_document_chunks(*_args, **_kwargs):
+        return {"retrieval_strategy": "ann", "results": []}
+
+    async def fake_web_fallback(*args, **kwargs):
+        _ = args, kwargs
+        return {"results": [], "_timed_out": True, "_query": "timeout-query", "_search_mode": "deep"}
+
+    monkeypatch.setattr(llm_service, "build_context", fake_build_context)
+    monkeypatch.setattr(llm_service, "_call_primary", should_not_call_model)
+    monkeypatch.setattr(llm_service, "update_memory", fake_update_memory)
+    monkeypatch.setattr(llm_service, "aretrieve_document_chunks", fake_retrieve_document_chunks)
+    monkeypatch.setattr(llm_service, "aretrieve_web_chunks", fake_web_fallback)
+
+    result = await llm_service.generate_response("user-1", "latest oxford ai admission")
+    assert result == llm_service._WEB_RETRIEVAL_TIMEOUT_DETAIL
+
+
+@pytest.mark.asyncio
 async def test_generate_response_uses_vector_when_web_fallback_empty(monkeypatch):
     monkeypatch.setenv("WEB_SEARCH_API_KEY", "test-key")
     monkeypatch.setattr(llm_service.settings.web_search, "enabled", True)
@@ -1638,6 +1819,72 @@ async def test_call_primary_uses_mock_mode_without_bedrock_client(monkeypatch):
     assert response.usage.total_tokens >= response.usage.prompt_tokens
 
 
+def test_model_ids_for_role_uses_role_specific_settings(monkeypatch):
+    monkeypatch.setattr(llm_service.settings.bedrock, "primary_model_id", "primary-model")
+    monkeypatch.setattr(llm_service.settings.bedrock, "fallback_model_id", "fallback-model")
+    monkeypatch.setattr(llm_service.settings.bedrock, "planner_model_id", "planner-model")
+    monkeypatch.setattr(llm_service.settings.bedrock, "planner_fallback_model_id", "planner-fallback")
+    monkeypatch.setattr(llm_service.settings.bedrock, "worker_model_id", "worker-model")
+    monkeypatch.setattr(llm_service.settings.bedrock, "worker_fallback_model_id", "worker-fallback")
+    monkeypatch.setattr(
+        llm_service.settings.bedrock, "worker_escalation_model_id", "worker-escalated"
+    )
+    monkeypatch.setattr(llm_service.settings.bedrock, "verifier_model_id", "verifier-model")
+    monkeypatch.setattr(llm_service.settings.bedrock, "verifier_fallback_model_id", "")
+    monkeypatch.setattr(llm_service.settings.bedrock, "finalizer_model_id", "finalizer-model")
+    monkeypatch.setattr(llm_service.settings.bedrock, "finalizer_fallback_model_id", "")
+
+    assert llm_service._model_ids_for_role("planner") == ("planner-model", "planner-fallback")
+    assert llm_service._model_ids_for_role("worker", attempt=1) == (
+        "worker-model",
+        "worker-fallback",
+    )
+    assert llm_service._model_ids_for_role("worker", attempt=2) == (
+        "worker-escalated",
+        "worker-fallback",
+    )
+    assert llm_service._model_ids_for_role("verifier") == ("verifier-model", "fallback-model")
+    assert llm_service._model_ids_for_role("finalizer") == ("finalizer-model", "fallback-model")
+
+
+@pytest.mark.asyncio
+async def test_call_model_with_fallback_uses_role_model_selection(monkeypatch):
+    monkeypatch.setattr(llm_service.settings.bedrock, "primary_model_id", "primary-model")
+    monkeypatch.setattr(llm_service.settings.bedrock, "fallback_model_id", "fallback-model")
+    monkeypatch.setattr(llm_service.settings.bedrock, "planner_model_id", "planner-model")
+    monkeypatch.setattr(llm_service.settings.bedrock, "planner_fallback_model_id", "planner-fallback")
+    monkeypatch.setattr(llm_service.settings.bedrock, "worker_model_id", "worker-model")
+    monkeypatch.setattr(llm_service.settings.bedrock, "worker_fallback_model_id", "worker-fallback")
+    monkeypatch.setattr(
+        llm_service.settings.bedrock, "worker_escalation_model_id", "worker-escalated"
+    )
+
+    calls: list[str] = []
+
+    async def fake_call_model_by_id(_messages, *, model_id: str):
+        calls.append(model_id)
+        return FakeResponse("ok")
+
+    monkeypatch.setattr(llm_service, "_call_model_by_id", fake_call_model_by_id)
+
+    state = {"used_fallback_model": False}
+    await llm_service._call_model_with_fallback(
+        [{"role": "user", "content": "hello"}],
+        state,
+        role="planner",
+    )
+    await llm_service._call_model_with_fallback(
+        [{"role": "user", "content": "hello"}],
+        state,
+        role="worker",
+        attempt=2,
+    )
+
+    assert calls == ["planner-model", "worker-escalated"]
+    assert state["role_model_ids"]["planner"]["primary"] == "planner-model"
+    assert state["role_model_ids"]["worker"]["primary"] == "worker-escalated"
+
+
 @pytest.mark.asyncio
 async def test_stream_primary_uses_mock_mode_without_bedrock_client(monkeypatch):
     monkeypatch.setenv("LLM_MOCK_MODE", "true")
@@ -1688,6 +1935,13 @@ def test_chat_cache_key_changes_across_modes():
 
 def test_resolve_initial_execution_mode_routes_auto_queries():
     assert llm_service._resolve_initial_execution_mode("auto", "hello") == "fast"
+    assert (
+        llm_service._resolve_initial_execution_mode(
+            "auto",
+            "tell me fau erlangen-nuernberg msc artificial intelligence course requirements and language requirements for international students",
+        )
+        == "deep"
+    )
     assert (
         llm_service._resolve_initial_execution_mode(
             "auto",
@@ -1961,6 +2215,24 @@ def test_enforce_citation_grounding_allows_uncited_comparison_fallback(monkeypat
     assert _REAL_ENFORCE_CITATION_GROUNDING(answer, state) == answer
 
 
+def test_extract_guarded_result_deadline_missing_date_is_partial_not_abstain(monkeypatch):
+    monkeypatch.setattr(
+        llm_service,
+        "guard_model_output",
+        lambda raw: {"text": str(raw), "blocked": False, "reason": ""},
+    )
+    monkeypatch.setattr(llm_service, "_enforce_citation_grounding", lambda text, _state: text)
+    state = {"deadline_query": True}
+    result = llm_service._extract_guarded_result(
+        user_id="user-1",
+        raw_result="Program language is English and TOEFL is accepted.",
+        state=state,
+    )
+    assert result != llm_service._NO_RELEVANT_INFORMATION_DETAIL
+    assert "Application deadline: Not verified from sources." in result
+    assert state["output_guard_reason"] == "deadline_missing_date"
+
+
 def test_required_answer_fields_and_missing_detection_for_comparison():
     prompt = (
         "Compare TUM vs LMU for English-taught data science master's programs, "
@@ -1981,6 +2253,78 @@ def test_required_answer_fields_and_missing_detection_for_comparison():
     )
     assert "comparison_between_requested_entities" in missing
     assert "application_deadline" in missing
+
+
+def test_required_answer_fields_for_admissions_requirements_query():
+    prompt = (
+        "Tell me MSc AI course requirements, language requirements for international students, "
+        "minimum IELTS/TOEFL scores, and whether I can get admission."
+    )
+    required = llm_service._required_answer_fields(prompt, intent="fact_lookup")
+    assert "eligibility_requirements" in required
+    assert "gpa_or_grade_threshold" in required
+    assert "ects_or_prerequisite_credit_breakdown" in required
+    assert "language_requirements" in required
+    assert "language_test_score_thresholds" in required
+    assert "admission_decision_signal" in required
+
+
+def test_required_answer_fields_language_requirement_only_does_not_force_gpa_or_ects():
+    prompt = "What is the language requirement for international students in MSc AI?"
+    required = llm_service._required_answer_fields(prompt, intent="fact_lookup")
+    assert "language_requirements" in required
+    assert "language_test_score_thresholds" not in required
+    assert "eligibility_requirements" not in required
+    assert "gpa_or_grade_threshold" not in required
+    assert "ects_or_prerequisite_credit_breakdown" not in required
+
+
+def test_required_answer_fields_include_application_portal_when_requested():
+    prompt = (
+        "Tell me MSc AI course requirements, language requirements, admission deadline, "
+        "and application portal for international students."
+    )
+    required = llm_service._required_answer_fields(prompt, intent="fact_lookup")
+    assert "application_deadline" in required
+    assert "application_portal" in required
+
+
+def test_required_answer_fields_requirements_language_do_not_force_decision_signal():
+    prompt = (
+        "Tell me MSc AI course requirements and language requirements for international students."
+    )
+    required = llm_service._required_answer_fields(prompt, intent="fact_lookup")
+    assert "eligibility_requirements" in required
+    assert "language_requirements" in required
+    assert "admission_decision_signal" not in required
+
+
+def test_required_answer_fields_detects_where_to_apply_as_portal():
+    prompt = "Tell me from where can I apply for this MSc course."
+    required = llm_service._required_answer_fields(prompt, intent="fact_lookup")
+    assert "application_portal" in required
+
+
+def test_required_answer_fields_detects_taught_subjects_as_curriculum():
+    prompt = "What are the things taught in this MSc course?"
+    required = llm_service._required_answer_fields(prompt, intent="fact_lookup")
+    assert "curriculum_focus" in required
+
+
+def test_admissions_answer_schema_message_enabled_for_requirements_query():
+    state = {
+        "required_answer_fields": [
+            "eligibility_requirements",
+            "gpa_or_grade_threshold",
+            "language_test_score_thresholds",
+        ]
+    }
+    message = llm_service._admissions_answer_schema_message(state)
+    assert message is not None
+    assert "Admissions answer schema" in message["content"]
+    assert "Eligibility Requirements" in message["content"]
+    assert "Language Requirements" in message["content"]
+    assert "Do not include an Admission Decision section unless explicitly requested." in message["content"]
 
 
 def test_missing_comparison_entities_detects_uncovered_entity():
@@ -2094,6 +2438,173 @@ def test_agentic_result_issues_marks_query_not_addressed_for_low_required_covera
     assert "missing_required_answer_fields" in issues
     assert "query_not_addressed" in issues
     assert state["required_field_coverage"] == 0.0
+
+
+def test_answer_matches_required_field_for_application_portal():
+    assert llm_service._answer_matches_required_field(
+        "application_portal",
+        "Apply online via the application portal: https://campus.uni-example.de",
+    )
+    assert not llm_service._answer_matches_required_field(
+        "application_portal",
+        "Use the application portal.",
+    )
+
+
+def test_agentic_result_issues_marks_missing_web_required_fields_for_admissions():
+    state = {
+        "citation_required": False,
+        "evidence_urls": [],
+        "required_answer_fields": [
+            "eligibility_requirements",
+            "language_requirements",
+            "language_test_score_thresholds",
+        ],
+        "web_required_fields_missing": ["language_score_thresholds", "application_deadline"],
+        "retrieval_single_domain_low_quality": False,
+        "deadline_query": False,
+    }
+    issues = llm_service._agentic_result_issues(
+        "Program is English taught. Language scores are not verified from sources.",
+        state,
+    )
+    assert "web_required_fields_missing" in issues
+    assert any(item.startswith("web_missing:") for item in issues)
+
+
+def test_agentic_result_issues_marks_confidence_below_target_in_deep_mode():
+    state = {
+        "citation_required": False,
+        "evidence_urls": [],
+        "required_answer_fields": [
+            "eligibility_requirements",
+            "language_requirements",
+            "application_deadline",
+        ],
+        "web_required_fields_missing": [],
+        "retrieval_single_domain_low_quality": False,
+        "deadline_query": False,
+        "execution_mode": "deep",
+        "trust_confidence": 0.58,
+    }
+    issues = llm_service._agentic_result_issues(
+        "Eligibility requirement is a relevant bachelor's degree.",
+        state,
+    )
+    assert "confidence_below_target" in issues
+
+
+def test_agentic_result_issues_marks_speculative_factual_claim_for_admissions():
+    state = {
+        "citation_required": False,
+        "evidence_urls": [],
+        "required_answer_fields": [
+            "eligibility_requirements",
+            "language_requirements",
+            "language_test_score_thresholds",
+        ],
+        "web_required_fields_missing": [],
+        "retrieval_single_domain_low_quality": False,
+        "deadline_query": False,
+    }
+    issues = llm_service._agentic_result_issues(
+        "Language of instruction is likely English, but exact IELTS score is not confirmed.",
+        state,
+    )
+    assert "speculative_factual_claim" in issues
+
+
+def test_is_hard_verification_failure_for_admissions_missing_web_fields():
+    state = {
+        "retrieval_source_count": 2,
+        "evidence_urls": ["https://uni-example.de/program"],
+        "required_answer_fields": ["eligibility_requirements", "language_requirements"],
+        "web_required_fields_missing": ["language_score_thresholds"],
+    }
+    issues = ["web_required_fields_missing", "web_missing:language_score_thresholds"]
+    assert (
+        llm_service._is_hard_verification_failure(
+            issues,
+            "Sample answer with citation (https://uni-example.de/program).",
+            state,
+        )
+        is True
+    )
+
+
+def test_allow_partial_admissions_answer_requires_rescue_exhaustion_for_missing_web_fields(
+    monkeypatch,
+):
+    monkeypatch.setattr(llm_service.settings.web_search, "agentic_required_field_rescue_max_rounds", 2)
+    state = {
+        "retrieval_source_count": 2,
+        "evidence_urls": ["https://uni-example.de/program"],
+        "required_answer_fields": [
+            "eligibility_requirements",
+            "language_requirements",
+            "application_deadline",
+        ],
+        "required_field_coverage": 0.8,
+        "web_required_field_coverage": 0.75,
+        "web_required_fields_missing": ["application_deadline"],
+        "execution_mode": "deep",
+        "web_fallback_attempted": True,
+        "agent_required_field_rescue_rounds": 0,
+        "web_timeout_count": 0,
+    }
+    assert (
+        llm_service._allow_partial_admissions_answer(
+            issues=["web_required_fields_missing"],
+            result="Program uses English (https://uni-example.de/program).",
+            state=state,
+        )
+        is False
+    )
+
+
+def test_allow_partial_admissions_answer_allows_after_rescue_budget_exhausted(monkeypatch):
+    monkeypatch.setattr(llm_service.settings.web_search, "agentic_required_field_rescue_max_rounds", 2)
+    state = {
+        "retrieval_source_count": 2,
+        "evidence_urls": ["https://uni-example.de/program"],
+        "required_answer_fields": [
+            "eligibility_requirements",
+            "language_requirements",
+            "application_deadline",
+        ],
+        "required_field_coverage": 0.8,
+        "web_required_field_coverage": 0.75,
+        "web_required_fields_missing": ["application_deadline"],
+        "execution_mode": "deep",
+        "web_fallback_attempted": True,
+        "agent_required_field_rescue_rounds": 2,
+        "web_timeout_count": 0,
+    }
+    assert (
+        llm_service._allow_partial_admissions_answer(
+            issues=["web_required_fields_missing"],
+            result="Program uses English (https://uni-example.de/program).",
+            state=state,
+        )
+        is True
+    )
+
+
+def test_is_hard_verification_failure_for_speculative_factual_claim():
+    state = {
+        "retrieval_source_count": 2,
+        "evidence_urls": ["https://uni-example.de/program"],
+        "required_answer_fields": ["language_requirements", "language_test_score_thresholds"],
+        "web_required_fields_missing": [],
+    }
+    assert (
+        llm_service._is_hard_verification_failure(
+            [],
+            "Language is likely English based on available pages (https://uni-example.de/program).",
+            state,
+        )
+        is True
+    )
 
 
 def test_cache_skip_reason_handles_abstain_like_variants():

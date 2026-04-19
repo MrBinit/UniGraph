@@ -934,6 +934,138 @@ def test_filter_rows_by_allowed_domains_keeps_official_and_daad_only(monkeypatch
     assert "https://research-forum.eu/ai" not in urls
 
 
+def test_official_domains_for_query_infers_university_domains():
+    domains = service._official_domains_for_query(
+        "tell me university of tubingen msc machine learning requirements"
+    )
+    assert "uni-tubingen.de" in domains or "uni-tuebingen.de" in domains
+
+    fau_domains = service._official_domains_for_query(
+        "tell me fau erlangen nurnberg msc artificial intelligence"
+    )
+    assert "fau.de" in fau_domains
+    tum_domains = service._official_domains_for_query(
+        "tell me about technical university of munich msc data engineering"
+    )
+    assert "tum.de" in tum_domains
+    assert "uni-munich.de" not in tum_domains
+
+
+def test_strict_official_policy_rejects_non_official_admissions_sources(monkeypatch):
+    monkeypatch.setattr(service.settings.web_search, "official_source_filter_enabled", True)
+    monkeypatch.setattr(service.settings.web_search, "official_source_allowlist", ["daad.de"])
+
+    rows = [
+        {
+            "title": "University of Tuebingen MSc Machine Learning",
+            "url": "https://www.uni-tuebingen.de/en/study/finding-a-course/degree-programs-available/detail/course/machine-learning-master/",
+            "snippet": "Official university program page with application details.",
+        },
+        {
+            "title": "MSc Machine Learning Guide",
+            "url": "https://myguide.de/program/tuebingen-machine-learning",
+            "snippet": "External guide for university applications.",
+        },
+        {
+            "title": "DAAD Program Entry",
+            "url": "https://www2.daad.de/deutschland/studienangebote/international-programmes/en/detail/5634/",
+            "snippet": "DAAD entry for the program.",
+        },
+    ]
+    filtered = service._filter_rows_by_allowed_domains_with_policy(
+        rows,
+        [".de", ".eu"],
+        strict_official=True,
+    )
+    urls = {str(item["url"]) for item in filtered}
+    assert (
+        "https://www.uni-tuebingen.de/en/study/finding-a-course/degree-programs-available/detail/course/machine-learning-master/"
+        in urls
+    )
+    assert (
+        "https://www2.daad.de/deutschland/studienangebote/international-programmes/en/detail/5634/"
+        in urls
+    )
+    assert "https://myguide.de/program/tuebingen-machine-learning" not in urls
+
+
+def test_filter_rows_by_target_domain_groups_enforces_scope_without_fallback(monkeypatch):
+    monkeypatch.setattr(service.settings.web_search, "official_source_allowlist", ["daad.de"])
+    rows = [
+        {
+            "title": "University of Bonn MSc Computer Science",
+            "url": "https://www.uni-bonn.de/en/studying/degree-programs/msc-computer-science",
+            "snippet": "Official admissions and requirements page.",
+        },
+        {
+            "title": "HBRS Master Program",
+            "url": "https://www.h-brs.de/en/cs/master-computer-science",
+            "snippet": "Another university page.",
+        },
+        {
+            "title": "DAAD Program Entry",
+            "url": "https://www2.daad.de/deutschland/studienangebote/international-programmes/en/detail/1234/",
+            "snippet": "DAAD source.",
+        },
+    ]
+    filtered = service._filter_rows_by_target_domain_groups(
+        rows,
+        target_groups=["uni-bonn.de"],
+        allow_fallback_on_empty=False,
+    )
+    urls = {str(item["url"]) for item in filtered}
+    assert "https://www.uni-bonn.de/en/studying/degree-programs/msc-computer-science" in urls
+    assert (
+        "https://www2.daad.de/deutschland/studienangebote/international-programmes/en/detail/1234/"
+        in urls
+    )
+    assert "https://www.h-brs.de/en/cs/master-computer-science" not in urls
+
+
+def test_collect_search_rows_enforces_target_domain_scope(monkeypatch):
+    monkeypatch.setattr(service.settings.web_search, "official_source_filter_enabled", True)
+    monkeypatch.setattr(service.settings.web_search, "official_source_allowlist", ["daad.de"])
+
+    payloads = [
+        {
+            "organic_results": [
+                {
+                    "title": "University of Bonn MSc Computer Science",
+                    "link": "https://www.uni-bonn.de/en/studying/degree-programs/msc-computer-science",
+                    "snippet": "Official program page with requirements.",
+                },
+                {
+                    "title": "HBRS Computer Science MSc",
+                    "link": "https://www.h-brs.de/en/cs/master-computer-science",
+                    "snippet": "Official page from a different university.",
+                },
+                {
+                    "title": "DAAD Program Entry",
+                    "link": "https://www2.daad.de/deutschland/studienangebote/international-programmes/en/detail/1234/",
+                    "snippet": "DAAD entry.",
+                },
+            ]
+        }
+    ]
+
+    rows = service._collect_search_rows(
+        payloads,
+        ["university of bonn msc computer science requirements"],
+        top_k=3,
+        allowed_suffixes=[".de", ".eu"],
+        strict_official=True,
+        target_domain_groups=["uni-bonn.de"],
+        enforce_target_domain_scope=True,
+    )
+    urls = {str(item["url"]) for item in rows}
+    assert "https://www.uni-bonn.de/en/studying/degree-programs/msc-computer-science" in urls
+    assert (
+        "https://www2.daad.de/deutschland/studienangebote/international-programmes/en/detail/1234/"
+        in urls
+    )
+    assert "https://www.h-brs.de/en/cs/master-computer-science" not in urls
+
+
 def test_fetch_page_data_sync_extracts_pdf(monkeypatch):
     class _FakePdfPage:
         def extract_text(self):
@@ -966,6 +1098,118 @@ def test_fetch_page_data_sync_extracts_pdf(monkeypatch):
     )
     assert "Admission requirements" in page["content"]
     assert page["published_date"] == ""
+    assert page["internal_links"] == []
+
+
+def test_extract_internal_links_keeps_same_domain_and_prioritizes_relevant_paths():
+    html = """
+    <html><body>
+      <a href="/admissions/requirements">Admission requirements</a>
+      <a href="https://www.uni-example.de/apply/portal">Apply now</a>
+      <a href="https://blog.example.com/post">External blog</a>
+      <a href="/files/regulations.pdf">Regulations PDF</a>
+    </body></html>
+    """
+    links = service._extract_internal_links(
+        html,
+        base_url="https://www.uni-example.de/program/msc-ai",
+        max_links=10,
+    )
+    urls = [str(item.get("url", "")) for item in links]
+    assert "https://www.uni-example.de/admissions/requirements" in urls
+    assert "https://www.uni-example.de/apply/portal" in urls
+    assert "https://www.uni-example.de/files/regulations.pdf" in urls
+    assert "https://blog.example.com/post" not in urls
+
+
+@pytest.mark.asyncio
+async def test_acrawl_internal_pages_fetches_second_level_internal_pages(monkeypatch):
+    monkeypatch.setattr(service.settings.web_search, "deep_internal_crawl_enabled", True)
+    monkeypatch.setattr(service.settings.web_search, "deep_internal_crawl_max_depth", 2)
+    monkeypatch.setattr(service.settings.web_search, "deep_internal_crawl_max_pages", 6)
+    monkeypatch.setattr(service.settings.web_search, "deep_internal_crawl_per_parent_limit", 3)
+    monkeypatch.setattr(service.settings.web_search, "deep_internal_crawl_links_per_page", 8)
+
+    seed_rows = [
+        {
+            "title": "Program",
+            "url": "https://www.uni-example.de/program",
+            "snippet": "Program page",
+            "published_date": "",
+        }
+    ]
+    seed_page_data = {
+        "https://www.uni-example.de/program": {
+            "content": "Program overview.",
+            "published_date": "",
+            "internal_links": [
+                {
+                    "url": "https://www.uni-example.de/admission",
+                    "text": "Admission requirements",
+                    "score": 2.0,
+                },
+                {
+                    "url": "https://www.uni-example.de/language",
+                    "text": "Language requirements",
+                    "score": 1.8,
+                },
+            ],
+        }
+    }
+
+    async def _fake_fetch_pages(rows: list[dict], **_kwargs):
+        payload: dict[str, dict] = {}
+        for row in rows:
+            url = str(row.get("url", "")).strip()
+            if url.endswith("/admission"):
+                payload[url] = {
+                    "content": "Minimum grade 2.5 and at least 30 ECTS.",
+                    "published_date": "",
+                    "internal_links": [
+                        {
+                            "url": "https://www.uni-example.de/deadline",
+                            "text": "Application deadline",
+                            "score": 1.7,
+                        }
+                    ],
+                }
+            elif url.endswith("/language"):
+                payload[url] = {
+                    "content": "IELTS 6.5 or TOEFL iBT 90.",
+                    "published_date": "",
+                    "internal_links": [],
+                }
+            elif url.endswith("/deadline"):
+                payload[url] = {
+                    "content": "Application deadline is 31 May.",
+                    "published_date": "",
+                    "internal_links": [],
+                }
+        return payload
+
+    monkeypatch.setattr(service, "_afetch_organic_pages", _fake_fetch_pages)
+
+    rows, pages, summary = await service._acrawl_internal_pages(
+        seed_rows=seed_rows,
+        seed_page_data_by_url=seed_page_data,
+        required_fields=[
+            {"id": "admission_requirements"},
+            {"id": "language_score_thresholds"},
+            {"id": "application_deadline"},
+        ],
+        allowed_suffixes=[],
+        target_domain_groups=[],
+        enforce_target_domain_scope=False,
+    )
+
+    crawled_urls = {str(item.get("url", "")) for item in rows}
+    assert "https://www.uni-example.de/admission" in crawled_urls
+    assert "https://www.uni-example.de/language" in crawled_urls
+    assert "https://www.uni-example.de/deadline" in crawled_urls
+    assert "https://www.uni-example.de/deadline" in pages
+    assert summary["enabled"] is True
+    assert summary["depth_reached"] >= 1
+    assert summary["pages_fetched"] >= 2
 
 
 def test_domain_group_key_collapses_official_subdomains():
@@ -988,8 +1232,99 @@ def test_required_fields_from_query_detects_explicit_fields():
     )
     ids = [str(item.get("id", "")).strip() for item in fields]
     assert "admission_requirements" in ids
+    assert "gpa_threshold" in ids
+    assert "ects_breakdown" in ids
+    assert "language_requirements" in ids
+    assert "language_score_thresholds" in ids
+    assert "application_deadline" in ids
+
+
+def test_required_fields_from_query_includes_application_portal():
+    fields = service._required_fields_from_query(
+        "Tell me course requirements, language requirements, admission deadline, and application portal."
+    )
+    ids = [str(item.get("id", "")).strip() for item in fields]
+    assert "admission_requirements" in ids
     assert "language_requirements" in ids
     assert "application_deadline" in ids
+    assert "application_portal" in ids
+
+
+def test_required_fields_from_query_detects_where_can_i_apply_as_portal():
+    fields = service._required_fields_from_query(
+        "tell me where can i apply for university of mannheim msc business informatics"
+    )
+    ids = [str(item.get("id", "")).strip() for item in fields]
+    assert "application_portal" in ids
+
+
+def test_required_fields_from_query_language_requirement_only_does_not_force_gpa_or_ects():
+    fields = service._required_fields_from_query(
+        "what is the language requirement for international students in msc business informatics"
+    )
+    ids = [str(item.get("id", "")).strip() for item in fields]
+    assert "language_requirements" in ids
+    assert "language_score_thresholds" in ids
+    assert "gpa_threshold" not in ids
+    assert "ects_breakdown" not in ids
+
+
+def test_required_fields_from_query_broad_program_profile_adds_depth_bundle():
+    fields = service._required_fields_from_query(
+        "tell me about technical university of munich msc data engineering"
+    )
+    ids = [str(item.get("id", "")).strip() for item in fields]
+    assert "program_overview" in ids
+    assert "duration_ects" in ids
+    assert "admission_requirements" in ids
+    assert "language_requirements" in ids
+    assert "application_deadline" in ids
+    assert "curriculum_modules" in ids
+
+
+def test_required_field_coverage_target_is_strict_for_multi_field_university_queries():
+    query = (
+        "tell me about university of tubingen msc machine learning course requirements "
+        "language requirements application deadline and application portal"
+    )
+    required_fields = service._required_fields_from_query(query)
+    target = service._required_field_coverage_target(query, required_fields)
+    assert target == 1.0
+
+
+def test_effective_retrieval_loop_max_steps_boosts_for_program_queries(monkeypatch):
+    monkeypatch.setattr(service.settings.web_search, "retrieval_loop_max_steps", 2)
+    required_fields = service._required_fields_from_query(
+        "tell me about technical university of munich msc data engineering"
+    )
+    boosted = service._effective_retrieval_loop_max_steps(
+        "tell me about technical university of munich msc data engineering",
+        required_fields,
+        deep_mode=True,
+    )
+    assert boosted >= 4
+
+
+def test_required_field_coverage_for_application_portal_requires_url():
+    required_fields = service._required_fields_from_query(
+        "application portal for msc machine learning"
+    )
+    portal_only_text = [
+        {
+            "content": "Applications are submitted via the online application portal.",
+            "metadata": {"url": "https://uni-example.de/admissions"},
+        }
+    ]
+    with_portal_url = [
+        {
+            "content": "Apply online through the application portal: https://campus.uni-example.de",
+            "metadata": {"url": "https://uni-example.de/admissions"},
+        }
+    ]
+    weak = service._required_field_coverage(required_fields, portal_only_text)
+    strong = service._required_field_coverage(required_fields, with_portal_url)
+    assert "application_portal" in weak["missing_ids"]
+    assert "application_portal" not in strong["missing_ids"]
 
 
 def test_required_field_coverage_for_language_requires_score():
@@ -1016,6 +1351,35 @@ def test_required_field_coverage_for_language_requires_score():
     assert weak["coverage"] < 1.0
     assert "language_requirements" not in strong["missing_ids"]
     assert strong["coverage"] == 1.0
+
+
+def test_required_field_coverage_for_gpa_and_ects_requires_numeric_thresholds():
+    required_fields = service._required_fields_from_query(
+        "course requirements eligibility and prerequisite credits"
+    )
+    weak = [
+        {
+            "content": "Applicants need a relevant bachelor's degree and strong background.",
+            "metadata": {"url": "https://uni-example.de/admission"},
+        }
+    ]
+    strong = [
+        {
+            "content": (
+                "Minimum grade requirement: 2.5 (German scale). "
+                "At least 30 ECTS in mathematics/computer science are required."
+            ),
+            "metadata": {"url": "https://uni-example.de/admission"},
+        }
+    ]
+
+    weak_status = service._required_field_coverage(required_fields, weak)
+    strong_status = service._required_field_coverage(required_fields, strong)
+
+    assert "gpa_threshold" in weak_status["missing_ids"]
+    assert "ects_breakdown" in weak_status["missing_ids"]
+    assert "gpa_threshold" not in strong_status["missing_ids"]
+    assert "ects_breakdown" not in strong_status["missing_ids"]
 
 
 @pytest.mark.asyncio
@@ -1095,3 +1459,163 @@ async def test_aretrieve_web_chunks_deep_loop_requeries_until_required_field_is_
     assert result["verification"]["required_field_coverage"] == 1.0
     assert result["verification"]["required_fields_missing"] == []
     assert result["verification"]["verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_aretrieve_web_chunks_runs_required_field_rescue_when_still_missing(monkeypatch):
+    monkeypatch.setattr(service.settings.web_search, "multi_query_enabled", False)
+    monkeypatch.setattr(service.settings.web_search, "query_planner_enabled", True)
+    monkeypatch.setattr(service.settings.web_search, "retrieval_loop_enabled", True)
+    monkeypatch.setattr(service.settings.web_search, "retrieval_loop_max_steps", 1)
+    monkeypatch.setattr(service.settings.web_search, "retrieval_loop_max_gap_queries", 1)
+    monkeypatch.setattr(service.settings.web_search, "deep_required_field_rescue_enabled", True)
+    monkeypatch.setattr(service.settings.web_search, "deep_required_field_rescue_max_queries", 2)
+    monkeypatch.setattr(service.settings.web_search, "allowed_domain_suffixes", [])
+
+    async def _fake_plan(_query: str, _allowed_suffixes: list[str]):
+        return {
+            "queries": ["uni sample msc ai language requirements"],
+            "subquestions": [],
+            "planner": "heuristic",
+            "llm_used": False,
+        }
+
+    calls: list[list[str]] = []
+
+    async def _fake_payloads(queries: list[str], *, top_k: int):
+        _ = top_k
+        calls.append(list(queries))
+        query_text = " ".join(queries).lower()
+        if "ielts" in query_text or "toefl" in query_text:
+            return [
+                {
+                    "organic_results": [
+                        {
+                            "title": "Language Scores",
+                            "link": "https://uni-example.de/language-scores",
+                            "snippet": "IELTS 6.5 or TOEFL iBT 90.",
+                        }
+                    ]
+                }
+            ]
+        return [
+            {
+                "organic_results": [
+                    {
+                        "title": "Language Overview",
+                        "link": "https://uni-example.de/language",
+                        "snippet": "Proof of English proficiency is required.",
+                    }
+                ]
+            }
+        ]
+
+    async def _fake_fetch_pages(rows: list[dict], **_kwargs):
+        payload: dict[str, dict] = {}
+        for row in rows:
+            url = str(row.get("url", "")).strip()
+            if "scores" in url:
+                payload[url] = {
+                    "content": "Accepted tests: IELTS 6.5 and TOEFL iBT 90 minimum.",
+                    "published_date": "2026-03-10",
+                }
+            else:
+                payload[url] = {
+                    "content": "Applicants must provide proof of English proficiency.",
+                    "published_date": "2026-03-10",
+                }
+        return payload
+
+    monkeypatch.setattr(service, "_resolve_query_plan", _fake_plan)
+    monkeypatch.setattr(service, "_asearch_payloads", _fake_payloads)
+    monkeypatch.setattr(service, "_afetch_organic_pages", _fake_fetch_pages)
+
+    result = await service.aretrieve_web_chunks(
+        "tell me language requirements for international students",
+        top_k=3,
+        search_mode="deep",
+    )
+
+    assert len(calls) == 2
+    assert any("ielts" in " ".join(batch).lower() for batch in calls[1:])
+    assert result["verification"]["required_field_coverage"] == 1.0
+    assert result["verification"]["required_fields_missing"] == []
+    assert result["retrieval_loop"]["steps"][-1]["step"] in {2, "required_field_rescue"}
+
+
+@pytest.mark.asyncio
+async def test_aretrieve_web_chunks_uses_internal_crawl_to_close_missing_language_scores(monkeypatch):
+    monkeypatch.setattr(service.settings.web_search, "multi_query_enabled", False)
+    monkeypatch.setattr(service.settings.web_search, "query_planner_enabled", True)
+    monkeypatch.setattr(service.settings.web_search, "retrieval_loop_enabled", True)
+    monkeypatch.setattr(service.settings.web_search, "retrieval_loop_max_steps", 1)
+    monkeypatch.setattr(service.settings.web_search, "retrieval_loop_max_gap_queries", 1)
+    monkeypatch.setattr(service.settings.web_search, "deep_required_field_rescue_enabled", False)
+    monkeypatch.setattr(service.settings.web_search, "deep_internal_crawl_enabled", True)
+    monkeypatch.setattr(service.settings.web_search, "deep_internal_crawl_max_depth", 2)
+    monkeypatch.setattr(service.settings.web_search, "deep_internal_crawl_max_pages", 4)
+    monkeypatch.setattr(service.settings.web_search, "deep_internal_crawl_links_per_page", 8)
+    monkeypatch.setattr(service.settings.web_search, "deep_internal_crawl_per_parent_limit", 3)
+    monkeypatch.setattr(service.settings.web_search, "allowed_domain_suffixes", [])
+
+    async def _fake_plan(_query: str, _allowed_suffixes: list[str]):
+        return {
+            "queries": ["uni sample msc ai language requirements"],
+            "subquestions": [],
+            "planner": "heuristic",
+            "llm_used": False,
+        }
+
+    async def _fake_payloads(queries: list[str], *, top_k: int):
+        _ = queries, top_k
+        return [
+            {
+                "organic_results": [
+                    {
+                        "title": "Language Overview",
+                        "link": "https://uni-example.de/language",
+                        "snippet": "Proof of English proficiency is required.",
+                    }
+                ]
+            }
+        ]
+
+    async def _fake_fetch_pages(rows: list[dict], **_kwargs):
+        payload: dict[str, dict] = {}
+        for row in rows:
+            url = str(row.get("url", "")).strip()
+            if "language-scores" in url:
+                payload[url] = {
+                    "content": "Accepted tests: IELTS 6.5 and TOEFL iBT 90 minimum.",
+                    "published_date": "2026-03-10",
+                    "internal_links": [],
+                }
+            else:
+                payload[url] = {
+                    "content": "Applicants must provide proof of English proficiency.",
+                    "published_date": "2026-03-10",
+                    "internal_links": [
+                        {
+                            "url": "https://uni-example.de/language-scores",
+                            "text": "IELTS TOEFL minimum score",
+                            "score": 2.0,
+                        }
+                    ],
+                }
+        return payload
+
+    monkeypatch.setattr(service, "_resolve_query_plan", _fake_plan)
+    monkeypatch.setattr(service, "_asearch_payloads", _fake_payloads)
+    monkeypatch.setattr(service, "_afetch_organic_pages", _fake_fetch_pages)
+
+    result = await service.aretrieve_web_chunks(
+        "tell me language requirements and ielts toefl minimum score for international students",
+        top_k=3,
+        search_mode="deep",
+    )
+
+    assert result["verification"]["required_field_coverage"] == 1.0
+    assert result["verification"]["required_fields_missing"] == []
+    steps = result["retrieval_loop"]["steps"]
+    assert steps
+    assert "crawl_internal_links" in set(steps[0].get("actions", []))

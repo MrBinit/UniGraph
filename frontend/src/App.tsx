@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { BrandIcon, BrandLogo } from "./components/Brand";
 import { ChatInput } from "./components/ChatInput";
 import { MenuIcon } from "./components/Icons";
 import { LoginPanel } from "./components/LoginPanel";
@@ -1467,69 +1466,26 @@ export default function App() {
         onSelectConversation={handleConversationSelect}
         onToggleTheme={() => setDarkMode((prev) => !prev)}
         darkMode={darkMode}
+        onLogout={handleLogout}
         mobileOpen={isSidebarOpen}
         onCloseMobile={() => setIsSidebarOpen(false)}
       />
 
-      <div className="md:ml-[260px]">
-        <header className="sticky top-0 z-20 border-b border-blue-100/80 bg-white/90 px-5 py-4 backdrop-blur dark:border-slate-800 dark:bg-slate-950/80">
-          <div className="mx-auto flex w-full max-w-4xl items-center justify-between gap-4">
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                className="rounded-lg p-1.5 text-slate-600 hover:bg-blue-50 hover:text-brand-blue dark:text-slate-300 dark:hover:bg-slate-800 md:hidden"
-                onClick={() => setIsSidebarOpen(true)}
-                aria-label="Open sidebar"
-              >
-                <MenuIcon className="h-5 w-5" />
-              </button>
-              <BrandIcon className="h-7 w-7 rounded-md" />
-              <BrandLogo compact className="hidden sm:block" />
-            </div>
-            <div className="flex items-start gap-3 text-sm text-slate-500 dark:text-slate-400">
-              <div className="max-w-[320px]">
-                <span className={statusError ? "rounded-md bg-rose-50 px-2 py-1 text-rose-600 dark:bg-rose-950/40 dark:text-rose-300" : ""}>
-                  {statusText}
-                </span>
-                {isAwaitingFirstChunk ? (
-                  <div className="mt-1 flex items-center gap-1 text-[11px] text-slate-500 dark:text-slate-400">
-                    {[0, 1, 2].map((index) => (
-                      <span
-                        key={index}
-                        className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand-blue/80 dark:bg-brand-red/80"
-                        style={{ animationDelay: `${index * 160}ms` }}
-                      />
-                    ))}
-                    <span className="ml-1">Working...</span>
-                  </div>
-                ) : null}
-              </div>
-              {isSending ? (
-                <button
-                  type="button"
-                  onClick={canCancelQueued ? handleCancelQueuedRequest : handleStopGeneration}
-                  className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-700 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-900/30 dark:text-amber-200 dark:hover:bg-amber-900/40"
-                >
-                  {canCancelQueued ? "Cancel queued" : "Stop generation"}
-                </button>
-              ) : null}
-              <button
-                type="button"
-                onClick={handleLogout}
-                className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-600 hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
-              >
-                Logout
-              </button>
-            </div>
-          </div>
-        </header>
-
+      <div className="md:ml-[220px]">
+        <button
+          type="button"
+          className="fixed left-3 top-3 z-20 rounded-lg border border-blue-200 bg-white/95 p-2 text-slate-600 shadow-sm hover:bg-blue-50 hover:text-brand-blue dark:border-slate-700 dark:bg-slate-900/95 dark:text-slate-300 dark:hover:bg-slate-800 md:hidden"
+          onClick={() => setIsSidebarOpen(true)}
+          aria-label="Open sidebar"
+        >
+          <MenuIcon className="h-5 w-5" />
+        </button>
         <main
           ref={chatContainerRef}
           onScroll={handleChatScroll}
-          className="h-[calc(100vh-154px)] overflow-y-auto"
+          className="h-[calc(100vh-88px)] overflow-y-auto"
         >
-          <div className="mx-auto flex min-h-full w-full max-w-4xl flex-col gap-4 px-4 pb-44 pt-6">
+          <div className="mx-auto flex min-h-full w-full max-w-4xl flex-col gap-4 px-4 pb-44 pt-4 md:pt-6">
 
             {messages.length ? (
               messages.map((message) => (
@@ -1567,7 +1523,43 @@ export default function App() {
           </button>
         ) : null}
 
-        <div className="fixed bottom-0 left-0 right-0 border-t border-blue-100 bg-white/75 backdrop-blur-md dark:border-slate-800 dark:bg-slate-950/80 md:left-[260px]">
+        <div className="fixed bottom-0 left-0 right-0 border-t border-blue-100 bg-white/75 backdrop-blur-md dark:border-slate-800 dark:bg-slate-950/80 md:left-[220px]">
+          {statusError || isAwaitingFirstChunk || isSending ? (
+            <div className="mx-auto flex w-full max-w-4xl items-center justify-between gap-3 px-4 pt-1.5 text-xs text-slate-500 dark:text-slate-400">
+              <div className="flex min-w-0 items-center gap-2">
+                <span
+                  className={`truncate ${
+                    statusError
+                      ? "rounded-md bg-rose-50 px-2 py-0.5 text-rose-600 dark:bg-rose-950/40 dark:text-rose-300"
+                      : ""
+                  }`}
+                >
+                  {statusText}
+                </span>
+                {isAwaitingFirstChunk ? (
+                  <div className="flex items-center gap-1">
+                    {[0, 1, 2].map((index) => (
+                      <span
+                        key={index}
+                        className="h-1.5 w-1.5 animate-pulse rounded-full bg-brand-blue/80 dark:bg-brand-red/80"
+                        style={{ animationDelay: `${index * 160}ms` }}
+                      />
+                    ))}
+                    <span className="ml-1">Working...</span>
+                  </div>
+                ) : null}
+              </div>
+              {isSending ? (
+                <button
+                  type="button"
+                  onClick={canCancelQueued ? handleCancelQueuedRequest : handleStopGeneration}
+                  className="shrink-0 rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-700 hover:bg-amber-100 dark:border-amber-800 dark:bg-amber-900/30 dark:text-amber-200 dark:hover:bg-amber-900/40"
+                >
+                  {canCancelQueued ? "Cancel queued" : "Stop generation"}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           <ChatInput
             value={inputValue}
             disabled={isSending}

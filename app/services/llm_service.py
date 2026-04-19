@@ -52,6 +52,9 @@ _LLM_MOCK_DELAY_MS_ENV = "LLM_MOCK_DELAY_MS"
 _LLM_MOCK_STREAM_CHUNK_CHARS_ENV = "LLM_MOCK_STREAM_CHUNK_CHARS"
 _RETRIEVAL_DISABLED_ENV = "RETRIEVAL_DISABLED"
 _NO_RELEVANT_INFORMATION_DETAIL = "Sorry, no relevant information is found."
+_WEB_RETRIEVAL_TIMEOUT_DETAIL = (
+    "Web retrieval timed out while verifying official sources. Please retry."
+)
 _DEFAULT_EXECUTION_MODE = "deep"
 _FAST_MODE = "fast"
 _DEEP_MODE = "deep"
@@ -72,6 +75,11 @@ _DEEP_COMPLEXITY_RE = re.compile(
 _INTENT_COMPARE_RE = re.compile(r"\b(vs|versus|compare|difference|better)\b", flags=re.IGNORECASE)
 _INTENT_DEADLINE_RE = re.compile(
     r"\b(deadline|apply by|last date|closing date|intake|application)\b", flags=re.IGNORECASE
+)
+_INTENT_REQUIREMENTS_RE = re.compile(
+    r"\b(requirement|requirements|eligibility|ielts|toefl|cefr|gpa|ects|credits?|"
+    r"language requirement|application portal|where to apply)\b",
+    flags=re.IGNORECASE,
 )
 _INTENT_FACT_RE = re.compile(
     r"\b(what is|how many|tuition|fee|duration|requirement|eligibility|ranking)\b",
@@ -120,6 +128,8 @@ _WEB_EXPANSION_SIMILARITY_THRESHOLD = 0.45
 _WEB_EXPANSION_MIN_DOMAIN_COUNT = 2
 _PARTIAL_EVIDENCE_AUTHORITY_MIN_SCORE = 0.75
 _WEB_RECOVERY_MAX_QUERIES = 2
+_WEB_TIMEOUT_RESCUE_MAX_QUERIES = 3
+_WEB_QUERY_MAX_CHARS = 220
 _QUERY_NOT_ANSWERED_MARKERS = (
     "does not address",
     "no comparison",
@@ -136,6 +146,24 @@ _GENERIC_PLACEHOLDER_MARKERS = (
     "please ask a specific",
     "could you clarify your question",
     "i need more details",
+)
+_LEADING_QUERY_FILLER_RE = re.compile(
+    r"^(?:tell me|can you|could you|please|i want to know|give me|show me|explain|about)\s+",
+    flags=re.IGNORECASE,
+)
+_TRAILING_QUERY_INSTRUCTION_RE = re.compile(
+    r"\b(if any information is missing|if information is missing|search deeper and verify.*|"
+    r"also tell me if .*competitive.*|also tell me if .*safe.*)\b.*$",
+    flags=re.IGNORECASE,
+)
+_SPECULATIVE_FACTUAL_CLAIM_RE = re.compile(
+    r"\b(likely|probably|possibly|may be|might be|appears to be|seems to be)\b",
+    flags=re.IGNORECASE,
+)
+_SPECULATIVE_FACTUAL_FIELD_RE = re.compile(
+    r"\b(language|english|german|ielts|toefl|cefr|deadline|apply|ects|credit|gpa|grade|"
+    r"requirements?|eligibility|duration|semesters?|fees?|tuition)\b",
+    flags=re.IGNORECASE,
 )
 _LOW_SIGNAL_SCAFFOLD_LINE_RE = re.compile(
     r"^(evidence and caveats|claim-by-claim citations|uncertainty|missing info|caveats|evidence)\s*:?\s*$",
@@ -168,7 +196,37 @@ _COMPARISON_ENTITY_DOMAIN_HINTS: tuple[tuple[str, str], ...] = (
     ("rwth aachen", "rwth-aachen.de"),
 )
 _CHAT_CACHE_VERSION = "v3"
-_CACHE_LOW_QUALITY_NOT_VERIFIED_RE = re.compile(r"\bnot verified from evidence\b", flags=re.IGNORECASE)
+_CACHE_LOW_QUALITY_NOT_VERIFIED_RE = re.compile(
+    r"\bnot verified from (?:evidence|sources)\b",
+    flags=re.IGNORECASE,
+)
+_REQUIRED_FIELD_LABELS = {
+    "comparison_between_requested_entities": "Comparison between requested entities",
+    "application_deadline": "Application deadline",
+    "application_portal": "Application portal",
+    "required_documents": "Required documents",
+    "eligibility_requirements": "Eligibility requirements",
+    "gpa_or_grade_threshold": "GPA/grade threshold",
+    "ects_or_prerequisite_credit_breakdown": "ECTS/prerequisite credit breakdown",
+    "tuition_or_fees": "Tuition/fees",
+    "language_requirements": "Language requirements",
+    "language_test_score_thresholds": "Language test score thresholds",
+    "curriculum_focus": "Curriculum focus",
+    "career_outcomes": "Career outcomes",
+    "scholarship_options": "Scholarship options",
+    "visa_or_work_rights": "Visa/work rights",
+    "aps_requirement_stage": "APS requirement stage",
+    "admission_decision_signal": "Admission decision signal",
+}
+_ADMISSIONS_CRITICAL_WEB_REQUIRED_FIELDS = {
+    "admission_requirements",
+    "gpa_threshold",
+    "ects_breakdown",
+    "language_requirements",
+    "language_score_thresholds",
+    "application_deadline",
+    "application_portal",
+}
 
 
 def _clamp01(value: float | None, *, fallback: float = 0.0) -> float:
@@ -266,6 +324,53 @@ def _safe_float(value) -> float | None:
         return None
 
 
+def _default_retrieval_top_k() -> int:
+    postgres_cfg = getattr(settings, "postgres", None)
+    value = _safe_int(getattr(postgres_cfg, "default_top_k", None)) if postgres_cfg else None
+    if value is None or value <= 0:
+        return 3
+    return max(1, min(50, value))
+
+
+def _normalized_model_id(value) -> str:
+    return " ".join(str(value or "").split()).strip()
+
+
+def _model_ids_for_role(role: str, *, attempt: int = 1) -> tuple[str, str]:
+    role_key = str(role or "worker").strip().lower()
+    default_primary = _normalized_model_id(settings.bedrock.primary_model_id)
+    default_fallback = _normalized_model_id(settings.bedrock.fallback_model_id)
+
+    if role_key == "planner":
+        primary = _normalized_model_id(getattr(settings.bedrock, "planner_model_id", ""))
+        fallback = _normalized_model_id(
+            getattr(settings.bedrock, "planner_fallback_model_id", "")
+        )
+    elif role_key == "verifier":
+        primary = _normalized_model_id(getattr(settings.bedrock, "verifier_model_id", ""))
+        fallback = _normalized_model_id(
+            getattr(settings.bedrock, "verifier_fallback_model_id", "")
+        )
+    elif role_key == "finalizer":
+        primary = _normalized_model_id(getattr(settings.bedrock, "finalizer_model_id", ""))
+        fallback = _normalized_model_id(
+            getattr(settings.bedrock, "finalizer_fallback_model_id", "")
+        )
+    else:
+        primary = _normalized_model_id(getattr(settings.bedrock, "worker_model_id", ""))
+        if int(attempt) > 1:
+            escalation = _normalized_model_id(
+                getattr(settings.bedrock, "worker_escalation_model_id", "")
+            )
+            if escalation:
+                primary = escalation
+        fallback = _normalized_model_id(getattr(settings.bedrock, "worker_fallback_model_id", ""))
+
+    resolved_primary = primary or default_primary
+    resolved_fallback = fallback or default_fallback or resolved_primary
+    return resolved_primary, resolved_fallback
+
+
 def _truthy_env(name: str) -> bool:
     """Parse one boolean feature flag from environment variables."""
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
@@ -316,11 +421,34 @@ def _is_complex_query_for_deep(query: str) -> bool:
     return False
 
 
+def _is_admissions_high_precision_query(query: str) -> bool:
+    compact = " ".join(str(query or "").split()).strip().lower()
+    if not compact:
+        return False
+    has_program_context = bool(
+        re.search(
+            r"\b(university|uni|master|masters|m\.sc|msc|program|programme|course|admission)\b",
+            compact,
+        )
+    )
+    if not has_program_context:
+        return False
+    return bool(
+        re.search(
+            r"\b(requirements?|eligibility|language|international students?|ielts|toefl|cefr|"
+            r"deadline|intake|ects|credits?|gpa|grade|tuition|fees?)\b",
+            compact,
+        )
+    )
+
+
 def _resolve_initial_execution_mode(requested_mode: str, safe_prompt: str) -> str:
     normalized = _normalized_request_mode(requested_mode)
     if normalized == _FAST_MODE:
         return _FAST_MODE
     if normalized == _DEEP_MODE:
+        return _DEEP_MODE
+    if _is_admissions_high_precision_query(safe_prompt):
         return _DEEP_MODE
     return _DEEP_MODE if _is_complex_query_for_deep(safe_prompt) else _FAST_MODE
 
@@ -353,10 +481,80 @@ def _mode_instruction_message(mode: str) -> dict:
     return {"role": "system", "content": _mode_instruction_text(mode)}
 
 
+def _response_cache_enabled() -> bool:
+    return bool(getattr(settings.web_search, "response_cache_enabled", True))
+
+
+def _admissions_answer_schema_message(state: dict) -> dict | None:
+    if not _is_admissions_requirements_query(state):
+        return None
+    required_fields = state.get("required_answer_fields")
+    required_fields = required_fields if isinstance(required_fields, list) else []
+    required_set = {str(item).strip() for item in required_fields if str(item).strip()}
+
+    sections: list[str] = ["Program Snapshot"]
+    if required_set & {
+        "eligibility_requirements",
+        "gpa_or_grade_threshold",
+        "ects_or_prerequisite_credit_breakdown",
+    }:
+        sections.append("Eligibility Requirements")
+    if required_set & {"language_requirements", "language_test_score_thresholds"}:
+        sections.append("Language Requirements")
+    if "application_deadline" in required_set or bool(state.get("deadline_query", False)):
+        sections.append("Deadlines")
+    if "tuition_or_fees" in required_set:
+        sections.append("Fees")
+    if "curriculum_focus" in required_set:
+        sections.append("Curriculum")
+    if "career_outcomes" in required_set:
+        sections.append("Career Outcomes")
+    include_admission_decision = "admission_decision_signal" in required_set
+    if include_admission_decision:
+        sections.append("Admission Decision")
+    sections.extend(["Missing Information", "Sources"])
+
+    content = (
+        "Admissions answer schema (deep):\n"
+        "- Use only the sections below, in this order:\n"
+    )
+    lines = [content.rstrip("\n")]
+    for index, section in enumerate(sections, start=1):
+        lines.append(f"  {index}) {section}")
+    lines.append("- Do not include sections not requested by the query.")
+    lines.append("- For requested fields, provide exact numbers/dates when present in evidence.")
+    if required_set & {
+        "eligibility_requirements",
+        "gpa_or_grade_threshold",
+        "ects_or_prerequisite_credit_breakdown",
+    }:
+        lines.append("- Under Eligibility Requirements include explicit lines for:")
+        lines.append("  - Degree/background requirement")
+        lines.append("  - GPA/grade threshold")
+        lines.append("  - ECTS/prerequisite credit breakdown")
+    if required_set & {"language_requirements", "language_test_score_thresholds"}:
+        lines.append("- Under Language Requirements include explicit lines for:")
+        lines.append("  - Accepted tests")
+        lines.append("  - Minimum scores")
+    if include_admission_decision:
+        lines.append("- Under Admission Decision include:")
+        lines.append("  - Verdict: Likely / Risky / Unknown")
+        lines.append("  - Why (1-2 lines grounded in evidence)")
+        lines.append("  - What applicant profile data is still needed")
+    else:
+        lines.append("- Do not include an Admission Decision section unless explicitly requested.")
+    lines.append('- If a field is unavailable, write exactly: "Not verified from sources."')
+    return {"role": "system", "content": "\n".join(lines)[:_RETRIEVAL_CONTEXT_MAX_CHARS]}
+
+
 def _answer_style_instruction_message(mode: str, state: dict) -> dict:
     required_fields = state.get("required_answer_fields")
     required_fields = required_fields if isinstance(required_fields, list) else []
-    required_text = ", ".join(str(item).strip() for item in required_fields[:6] if str(item).strip())
+    required_text = ", ".join(
+        _required_field_label(str(item).strip())
+        for item in required_fields[:6]
+        if str(item).strip()
+    )
     if not required_text:
         required_text = "query-specific required fields"
 
@@ -372,9 +570,12 @@ def _answer_style_instruction_message(mode: str, state: dict) -> dict:
         "- Start with a 1-2 sentence direct answer.\n"
         "- Then use clear markdown sections only when relevant (for example: Program Overview, "
         "Eligibility Requirements, Language Requirements, Deadlines, Fees, Missing Information, Sources).\n"
+        "- Use only sections requested by the query/required fields; do not pad with extra sections.\n"
         "- Ensure required fields are explicitly covered: "
         f"{required_text}.\n"
         "- Keep one fact per bullet and avoid duplicated lines.\n"
+        "- Prefer structured field lines over long paragraphs for admissions questions.\n"
+        "- Do not include an Admission Decision section unless the user explicitly asks for admission likelihood.\n"
         "- Add one inline URL citation to each factual bullet.\n"
         "- Do not output scaffolding headings like 'Evidence and caveats' or 'Claim-by-Claim Citations'.\n"
         "- End with one 'Sources' section listing unique URLs only."
@@ -408,8 +609,8 @@ def _execution_policy(mode: str) -> dict:
         "mode": _DEEP_MODE,
         "planner_enabled": _agentic_planner_enabled(),
         "verifier_enabled": _agentic_verifier_enabled(),
-        # Deep mode is intentionally capped to one repair round for predictable latency.
-        "max_attempts": min(2, 1 + (_agentic_max_reflection_rounds() if _agentic_enabled() else 0)),
+        # Deep mode allows up to two repair rounds (initial draft + up to 2 revisions).
+        "max_attempts": min(3, 1 + (_agentic_max_reflection_rounds() if _agentic_enabled() else 0)),
         "web_search_mode": _DEEP_MODE,
         "auto_requested": normalized == _AUTO_MODE,
     }
@@ -516,6 +717,14 @@ def _agentic_verifier_min_coverage_score() -> float:
     value = _safe_float(raw)
     if value is None:
         return 0.75
+    return max(0.0, min(1.0, value))
+
+
+def _deep_answer_min_confidence() -> float:
+    raw = getattr(settings.web_search, "deep_answer_min_confidence", 0.72)
+    value = _safe_float(raw)
+    if value is None:
+        return 0.72
     return max(0.0, min(1.0, value))
 
 
@@ -774,6 +983,7 @@ def _build_json_metrics_record(
             "requested_mode": str(state.get("requested_mode", _DEFAULT_EXECUTION_MODE)),
             "execution_mode": str(state.get("execution_mode", _DEFAULT_EXECUTION_MODE)),
             "auto_escalated": bool(state.get("auto_escalated", False)),
+            "role_model_ids": state.get("role_model_ids") or {},
             "agentic_enabled": bool(state.get("agentic_enabled", False)),
             "agent_rounds": int(state.get("agent_rounds", 0) or 0),
             "agent_last_issues": state.get("agent_last_issues") or [],
@@ -882,6 +1092,9 @@ def _classify_query_intent(user_prompt: str) -> str:
         return "unknown"
     if _INTENT_COMPARE_RE.search(text):
         return "comparison"
+    # Mixed admissions questions should not be downgraded to pure deadline intent.
+    if _INTENT_DEADLINE_RE.search(text) and _INTENT_REQUIREMENTS_RE.search(text):
+        return "fact_lookup"
     if _INTENT_DEADLINE_RE.search(text):
         return "deadline"
     if _INTENT_PLAN_RE.search(text):
@@ -1041,19 +1254,48 @@ def _comparison_entity_expansion_queries(
 def _required_answer_fields(user_prompt: str, *, intent: str) -> list[str]:
     text = " ".join(str(user_prompt or "").split()).strip().lower()
     required: list[str] = []
+    asks_apply_portal = bool(
+        re.search(
+            r"\b(application portal|online application|apply online|bewerbungsportal|"
+            r"where (?:can i|to) apply|how to apply|where can i apply)\b",
+            text,
+        )
+    )
+    has_requirements_scope = bool(
+        re.search(
+            r"\b(admission requirements?|course requirements?|eligibility|entry criteria|"
+            r"required documents?|prerequisites?)\b",
+            text,
+        )
+    )
+    has_language_scope = bool(
+        re.search(r"\b(language|ielts|toefl|english|german|cefr|international students?)\b", text)
+    )
+    has_language_score_scope = bool(
+        re.search(
+            r"\b(ielts|toefl|cefr|minimum score|score threshold|required score|test score|band)\b",
+            text,
+        )
+    )
     if intent == "comparison":
         required.append("comparison_between_requested_entities")
     if "deadline" in text or "apply by" in text or "last date" in text:
         required.append("application_deadline")
+    if asks_apply_portal:
+        required.append("application_portal")
     if "document" in text or "required document" in text:
         required.append("required_documents")
-    if "requirement" in text or "eligibility" in text:
+    if has_requirements_scope:
         required.append("eligibility_requirements")
+        required.append("gpa_or_grade_threshold")
+        required.append("ects_or_prerequisite_credit_breakdown")
     if "tuition" in text or "fees" in text or "semester contribution" in text:
         required.append("tuition_or_fees")
-    if "language" in text or "ielts" in text or "toefl" in text:
+    if has_language_scope:
         required.append("language_requirements")
-    if "curriculum" in text or "focus" in text:
+    if has_language_score_scope:
+        required.append("language_test_score_thresholds")
+    if re.search(r"\b(curriculum|focus|modules?|syllabus|course structure|taught|subjects?)\b", text):
         required.append("curriculum_focus")
     if "career" in text or "outcome" in text:
         required.append("career_outcomes")
@@ -1063,6 +1305,14 @@ def _required_answer_fields(user_prompt: str, *, intent: str) -> list[str]:
         required.append("visa_or_work_rights")
     if "aps" in text:
         required.append("aps_requirement_stage")
+    if (
+        "can i get admission" in text
+        or "whether i can get admission" in text
+        or "chance of admission" in text
+        or "am i eligible" in text
+        or "admission decision" in text
+    ):
+        required.append("admission_decision_signal")
     deduped: list[str] = []
     seen: set[str] = set()
     for item in required:
@@ -1071,6 +1321,54 @@ def _required_answer_fields(user_prompt: str, *, intent: str) -> list[str]:
         seen.add(item)
         deduped.append(item)
     return deduped[:8]
+
+
+def _required_field_label(field: str) -> str:
+    key = str(field or "").strip()
+    if not key:
+        return "Unknown field"
+    label = _REQUIRED_FIELD_LABELS.get(key, "")
+    if label:
+        return label
+    return key.replace("_", " ").strip().title()
+
+
+def _is_admissions_requirements_query(state: dict) -> bool:
+    required_fields = state.get("required_answer_fields")
+    required_fields = required_fields if isinstance(required_fields, list) else []
+    required_set = {str(item).strip() for item in required_fields if str(item).strip()}
+    admission_markers = {
+        "eligibility_requirements",
+        "gpa_or_grade_threshold",
+        "ects_or_prerequisite_credit_breakdown",
+        "language_requirements",
+        "language_test_score_thresholds",
+        "application_deadline",
+        "application_portal",
+    }
+    return bool(required_set & admission_markers)
+
+
+def _admissions_missing_web_fields(state: dict) -> list[str]:
+    raw = state.get("web_required_fields_missing")
+    if not isinstance(raw, list):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        value = " ".join(str(item).split()).strip().lower()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        normalized.append(value)
+    return normalized[:8]
+
+
+def _admissions_critical_web_fields_missing(state: dict) -> list[str]:
+    if not _is_admissions_requirements_query(state):
+        return []
+    missing = _admissions_missing_web_fields(state)
+    return [item for item in missing if item in _ADMISSIONS_CRITICAL_WEB_REQUIRED_FIELDS]
 
 
 def _required_fields_system_message(state: dict) -> dict | None:
@@ -1083,16 +1381,22 @@ def _required_fields_system_message(state: dict) -> dict | None:
     lines = [
         "Answer schema requirements:",
         "- Cover every required field below using evidence-backed facts.",
-        "- If a required field cannot be verified, explicitly write: Not verified from evidence.",
+        '- If a required field cannot be verified, explicitly write: "Not verified from sources."',
+        "- Prefer exact numbers/dates over generic wording when present in evidence.",
         "- Do not return a generic disclaimer as the primary answer.",
         "Required fields:",
     ]
     for item in required_fields:
-        lines.append(f"- {item}")
+        lines.append(f"- {item}: {_required_field_label(item)}")
     if entities:
         lines.append("Required comparison entities:")
         lines.extend(f"- {entity}" for entity in entities[:2])
     return {"role": "system", "content": "\n".join(lines)[:_RETRIEVAL_CONTEXT_MAX_CHARS]}
+
+
+def _has_not_verified_marker(answer: str) -> bool:
+    lowered = str(answer or "").lower()
+    return "not verified from evidence" in lowered or "not verified from sources" in lowered
 
 
 def _answer_matches_required_field(
@@ -1105,16 +1409,48 @@ def _answer_matches_required_field(
         return _has_date_like_value(answer) or bool(
             re.search(r"\bdeadline|apply by|last date\b", lowered)
         )
+    if field == "application_portal":
+        return bool(
+            re.search(
+                r"\b(application portal|apply online|online application|bewerbungsportal|application system)\b",
+                lowered,
+            )
+            and ("http://" in lowered or "https://" in lowered or "www." in lowered)
+        )
     if field == "required_documents":
         return bool(re.search(r"\bdocument|documents|required\b", lowered))
     if field == "eligibility_requirements":
         return bool(re.search(r"\brequirement|requirements|eligibility|eligible\b", lowered))
+    if field == "gpa_or_grade_threshold":
+        return bool(
+            re.search(r"\b(gpa|grade point|minimum grade|cgpa|grade average)\b", lowered)
+            and (
+                re.search(r"\b\d(?:[.,]\d+)?\b", lowered)
+                or _has_not_verified_marker(answer)
+            )
+        )
+    if field == "ects_or_prerequisite_credit_breakdown":
+        return bool(
+            re.search(r"\b(ects|credit|credits|cp|prerequisite)\b", lowered)
+            and (
+                re.search(r"\b\d{1,3}(?:[.,]\d+)?\b", lowered)
+                or _has_not_verified_marker(answer)
+            )
+        )
     if field == "tuition_or_fees":
         return bool(
             re.search(r"\btuition|fee|fees|semester contribution|eur|€|no tuition\b", lowered)
         )
     if field == "language_requirements":
         return bool(re.search(r"\blanguage|english|german|ielts|toefl|c1|c2|b2\b", lowered))
+    if field == "language_test_score_thresholds":
+        return bool(
+            re.search(r"\b(ielts|toefl|cefr|cambridge|duolingo)\b", lowered)
+            and (
+                re.search(r"\b\d(?:[.,]\d+)?\b", lowered)
+                or _has_not_verified_marker(answer)
+            )
+        )
     if field == "curriculum_focus":
         return bool(re.search(r"\bcurriculum|focus|module|coursework\b", lowered))
     if field == "career_outcomes":
@@ -1126,6 +1462,13 @@ def _answer_matches_required_field(
     if field == "aps_requirement_stage":
         return bool(
             re.search(r"\baps|certificate|required|before applying|application stage\b", lowered)
+        )
+    if field == "admission_decision_signal":
+        return bool(
+            re.search(
+                r"\b(admission decision|decision snapshot|verdict|likely|risky|unclear|cannot determine)\b",
+                lowered,
+            )
         )
     if field == "comparison_between_requested_entities":
         entities = comparison_entities if isinstance(comparison_entities, list) else []
@@ -1160,11 +1503,17 @@ def _missing_required_answer_fields(answer: str, state: dict) -> list[str]:
     return missing[:8]
 
 
-def _query_decomposition_limit() -> int:
+def _query_decomposition_limit(state: dict | None = None) -> int:
     configured = _safe_int(getattr(settings.web_search, "max_query_variants", 3))
     if configured is None:
         return 3
-    return max(1, min(4, configured))
+    deep_configured = _safe_int(getattr(settings.web_search, "deep_max_query_variants", configured))
+    if deep_configured is None:
+        deep_configured = configured
+    mode = _mode_from_state(state)
+    if mode == _FAST_MODE:
+        return max(1, min(2, configured))
+    return max(2, min(8, max(configured, deep_configured)))
 
 
 def _decompose_retrieval_queries(*, base_query: str, state: dict) -> list[str]:
@@ -1173,6 +1522,9 @@ def _decompose_retrieval_queries(*, base_query: str, state: dict) -> list[str]:
         return []
 
     intent = str(state.get("query_intent", "exploration")).strip().lower()
+    required_fields = state.get("required_answer_fields")
+    required_fields = required_fields if isinstance(required_fields, list) else []
+    required_set = {str(item).strip() for item in required_fields if str(item).strip()}
     variants: list[str] = [query]
     if intent == "deadline":
         variants.extend(
@@ -1205,7 +1557,29 @@ def _decompose_retrieval_queries(*, base_query: str, state: dict) -> list[str]:
     else:
         variants.append(f"{query} official source")
 
-    limit = _query_decomposition_limit()
+    if required_set & {
+        "eligibility_requirements",
+        "gpa_or_grade_threshold",
+        "ects_or_prerequisite_credit_breakdown",
+    }:
+        variants.extend(
+            [
+                f"{query} official admission requirements GPA ECTS prerequisites",
+                f"{query} official eligibility criteria minimum grade credit requirements",
+                f"{query} official examination regulations admission criteria PDF",
+            ]
+        )
+    if required_set & {"language_requirements", "language_test_score_thresholds"}:
+        variants.extend(
+            [
+                f"{query} official language requirements IELTS TOEFL minimum score",
+                f"{query} accepted English tests CEFR minimum score official",
+            ]
+        )
+    if "application_deadline" in required_set:
+        variants.append(f"{query} official application deadline exact date")
+
+    limit = _query_decomposition_limit(state)
     normalized: list[str] = []
     max_queries = 4 if intent == "comparison" else 3
     seen: set[str] = set()
@@ -1238,6 +1612,8 @@ def _web_expansion_queries(
         return []
 
     intent = str(state.get("query_intent", "exploration")).strip().lower()
+    missing_fields = state.get("web_required_fields_missing")
+    missing_fields = missing_fields if isinstance(missing_fields, list) else []
     variants: list[str] = []
     if intent == "comparison":
         variants.extend(
@@ -1261,6 +1637,13 @@ def _web_expansion_queries(
                 f"{query} official eligibility criteria",
             ]
         )
+    for field in [str(item).strip() for item in missing_fields if str(item).strip()][:4]:
+        if field in {"admission_requirements", "eligibility_requirements", "gpa_or_grade_threshold"}:
+            variants.append(f"{query} official admission requirements minimum grade GPA ECTS")
+        elif field in {"language_requirements", "language_test_score_thresholds"}:
+            variants.append(f"{query} official IELTS TOEFL CEFR minimum score")
+        elif field == "application_deadline":
+            variants.append(f"{query} official application deadline exact date")
     if intent == "deadline":
         variants.append(f"{query} official deadline date")
     elif intent == "comparison":
@@ -1766,6 +2149,11 @@ def _derive_evidence_trust_signals(results: list[dict], state: dict) -> None:
     if web_required_coverage is not None:
         # Penalize confidence when deep retrieval did not close required fields.
         confidence -= (1.0 - web_required_coverage) * 0.25
+    admissions_critical_missing = _admissions_critical_web_fields_missing(state)
+    if admissions_critical_missing:
+        confidence -= min(0.35, 0.1 * len(admissions_critical_missing))
+    if _is_admissions_requirements_query(state) and web_required_coverage is None:
+        confidence -= 0.12
     confidence = _clamp01(confidence, fallback=0.5)
 
     state["trust_confidence"] = round(confidence, 4)
@@ -1791,6 +2179,10 @@ def _derive_evidence_trust_signals(results: list[dict], state: dict) -> None:
         uncertainty_reasons.append("Independent source corroboration is limited.")
     if web_required_coverage is not None and web_required_coverage < 0.999:
         uncertainty_reasons.append("Some requested fields are not fully verified from web evidence.")
+    if admissions_critical_missing:
+        uncertainty_reasons.append(
+            "Critical admissions fields are still missing from verified official evidence."
+        )
     state["trust_uncertainty_reasons"] = uncertainty_reasons[:3]
 
     emit_trace_event(
@@ -1893,17 +2285,35 @@ def _retrieval_fanout_enabled() -> bool:
     return bool(getattr(settings.web_search, "retrieval_fanout_enabled", True))
 
 
-def _web_retrieval_timeout_seconds(search_mode: str | None = None) -> float:
+def _web_retrieval_timeout_seconds(search_mode: str | None = None, *, query: str | None = None) -> float:
     configured = _safe_float(getattr(settings.web_search, "timeout_seconds", 12.0))
     if configured is None:
         configured = 12.0
     normalized_mode = _normalized_request_mode(search_mode)
     if normalized_mode == _AUTO_MODE:
         normalized_mode = _DEEP_MODE
-    multiplier = 6.0 if normalized_mode == _DEEP_MODE else 3.0
-    floor_seconds = 30.0 if normalized_mode == _DEEP_MODE else 12.0
-    ceiling_seconds = 120.0 if normalized_mode == _DEEP_MODE else 60.0
-    return max(floor_seconds, min(ceiling_seconds, configured * multiplier))
+    if normalized_mode == _DEEP_MODE:
+        explicit = _safe_float(getattr(settings.web_search, "deep_timeout_seconds", 0.0))
+        if explicit is not None and explicit > 0:
+            return max(30.0, min(300.0, explicit))
+        multiplier = 8.0
+        floor_seconds = 45.0
+        ceiling_seconds = 180.0
+    else:
+        explicit = _safe_float(getattr(settings.web_search, "fast_timeout_seconds", 0.0))
+        if explicit is not None and explicit > 0:
+            return max(10.0, min(120.0, explicit))
+        multiplier = 2.5
+        floor_seconds = 10.0
+        ceiling_seconds = 60.0
+    timeout_seconds = configured * multiplier
+    compact_query = " ".join(str(query or "").split()).strip()
+    if normalized_mode == _DEEP_MODE and compact_query:
+        if len(compact_query) >= 220:
+            timeout_seconds *= 1.35
+        if len(compact_query) >= 420:
+            timeout_seconds *= 1.2
+    return max(floor_seconds, min(ceiling_seconds, timeout_seconds))
 
 
 async def _run_one_web_query_with_timeout(
@@ -1912,6 +2322,7 @@ async def _run_one_web_query_with_timeout(
     top_k: int,
     search_mode: str,
 ) -> dict | None:
+    timeout_seconds = _web_retrieval_timeout_seconds(search_mode, query=query)
     try:
         return await asyncio.wait_for(
             _aretrieve_web_chunks_with_mode(
@@ -1919,19 +2330,106 @@ async def _run_one_web_query_with_timeout(
                 top_k=top_k,
                 search_mode=search_mode,
             ),
-            timeout=_web_retrieval_timeout_seconds(search_mode),
+            timeout=timeout_seconds,
         )
     except asyncio.TimeoutError:
         logger.warning(
             "Web retrieval timed out; mode=%s timeout_s=%.2f query=%s",
             str(search_mode),
-            _web_retrieval_timeout_seconds(search_mode),
+            timeout_seconds,
             query,
         )
-        return None
+        emit_trace_event(
+            "web_query_timeout",
+            {
+                "mode": str(search_mode),
+                "timeout_s": timeout_seconds,
+                "query": query[:220],
+            },
+        )
+        return {
+            "results": [],
+            "_timed_out": True,
+            "_timeout_seconds": timeout_seconds,
+            "_query": query,
+            "_search_mode": str(search_mode),
+        }
     except Exception as exc:
         logger.warning("Web retrieval query failed; query=%s error=%s", query, exc)
         return None
+
+
+def _web_result_timed_out(result: dict | None) -> bool:
+    if not isinstance(result, dict):
+        return False
+    return bool(result.get("_timed_out", False))
+
+
+def _compact_web_retrieval_query(*, base_query: str, state: dict) -> str:
+    compact = " ".join(str(base_query or "").replace("\n", " ").split()).strip()
+    if not compact:
+        return ""
+    # Keep search queries narrowly factual; strip metainstructions and user-facing directives.
+    compact = re.split(
+        r"\b(if any information is missing|if information is missing|search deeper and verify|"
+        r"use official sources only|verify using official sources only|also tell me if)\b",
+        compact,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0].strip(" .")
+    compact = _TRAILING_QUERY_INSTRUCTION_RE.sub("", compact).strip(" .")
+    compact = _LEADING_QUERY_FILLER_RE.sub("", compact).strip(" .")
+    compact = re.sub(r"\s*[:;]\s*", " ", compact).strip()
+    compact = re.sub(r"\s*-\s*", " ", compact).strip()
+    compact = re.sub(r"\s{2,}", " ", compact).strip()
+    # Use only the first sentence/question to avoid oversized generated search queries.
+    first_sentence = re.split(r"(?<=[.?!])\s+", compact, maxsplit=1)[0].strip()
+    if first_sentence:
+        compact = first_sentence
+    required_fields = state.get("required_answer_fields")
+    required_fields = required_fields if isinstance(required_fields, list) else []
+    field_hints: list[str] = []
+    for field in required_fields:
+        key = str(field).strip()
+        if key == "application_deadline":
+            field_hints.append("application deadline")
+        elif key in {"language_requirements", "language_test_score_thresholds"}:
+            field_hints.append("IELTS TOEFL language requirement")
+        elif key in {"eligibility_requirements", "gpa_or_grade_threshold"}:
+            field_hints.append("admission requirement GPA")
+        elif key == "ects_or_prerequisite_credit_breakdown":
+            field_hints.append("ECTS prerequisite credits")
+        elif key == "application_portal":
+            field_hints.append("application portal")
+    if field_hints:
+        suffix = " ".join(field_hints[:4]).strip()
+        lowered = compact.lower()
+        if suffix and suffix.lower() not in lowered:
+            compact = f"{compact} {suffix}".strip()
+    if len(compact) <= _WEB_QUERY_MAX_CHARS:
+        return compact
+    return compact[:_WEB_QUERY_MAX_CHARS].rsplit(" ", 1)[0].strip() or compact[:_WEB_QUERY_MAX_CHARS]
+
+
+def _timeout_rescue_queries(*, base_query: str, state: dict) -> list[str]:
+    compact_base = _compact_web_retrieval_query(base_query=base_query, state=state)
+    candidates = _decompose_retrieval_queries(base_query=compact_base, state=state)
+    if compact_base:
+        candidates = [compact_base] + candidates
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        compact = " ".join(str(candidate).split()).strip()
+        if not compact:
+            continue
+        key = compact.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(compact[:_WEB_QUERY_MAX_CHARS])
+        if len(normalized) >= _WEB_TIMEOUT_RESCUE_MAX_QUERIES:
+            break
+    return normalized
 
 
 def _result_dicts(rows) -> list[dict]:
@@ -1953,6 +2451,19 @@ async def _retrieve_vector_candidates(
     prefetched_result: dict | None = None,
     query_variants: list[str] | None = None,
 ) -> tuple[list[dict], float | None]:
+    if not bool(getattr(settings.postgres, "enabled", False)):
+        state["retrieval_strategy"] = "vector_disabled"
+        state["retrieval_query_variants"] = [retrieval_query]
+        _set_retrieval_state(state, [])
+        emit_trace_event(
+            "retrieval_vector_skipped",
+            {
+                "reason": "postgres_disabled",
+                "query": retrieval_query[:220],
+            },
+        )
+        return [], None
+
     variants = (
         query_variants if isinstance(query_variants, list) and query_variants else [retrieval_query]
     )
@@ -1980,10 +2491,14 @@ async def _retrieve_vector_candidates(
     )
 
     async def _run_one_vector_query(query: str) -> dict:
-        return await aretrieve_document_chunks(
-            query,
-            top_k=settings.postgres.default_top_k,
-        )
+        try:
+            return await aretrieve_document_chunks(
+                query,
+                top_k=_default_retrieval_top_k(),
+            )
+        except Exception as exc:
+            logger.warning("Vector retrieval query failed; continuing. %s", exc)
+            return {"retrieval_strategy": "vector_error", "results": []}
 
     retrieval_results: list[dict] = []
     first_variant = normalized_variants[0]
@@ -2025,7 +2540,7 @@ async def _retrieve_vector_candidates(
 
     max_context_results = _max_context_results_for_mode(_mode_from_state(state))
     merge_limit = max(
-        int(settings.postgres.default_top_k) * max(1, len(normalized_variants)),
+        int(_default_retrieval_top_k()) * max(1, len(normalized_variants)),
         max_context_results,
         int(settings.bedrock.reranker_max_documents),
     )
@@ -2084,6 +2599,10 @@ async def _retrieve_web_candidates_if_needed(
     state["web_retrieval_verified"] = None
     state["web_required_field_coverage"] = None
     state["web_required_fields_missing"] = []
+    state["web_timeout_count"] = 0
+    state["web_timed_out_queries"] = []
+    state["web_timeout_rescued"] = False
+    web_query = _compact_web_retrieval_query(base_query=retrieval_query, state=state) or retrieval_query
 
     if not (
         always_web_retrieval
@@ -2105,7 +2624,7 @@ async def _retrieve_web_candidates_if_needed(
             "web_retrieval_skipped",
             {
                 "reason": skip_reason,
-                "query": retrieval_query[:220],
+                "query": web_query[:220],
                 "planner_available": web_ready,
                 "top_similarity": top_similarity,
                 "vector_domain_count": vector_domain_count,
@@ -2132,7 +2651,7 @@ async def _retrieve_web_candidates_if_needed(
         "web_fallback_started",
         {
             "reason": reason,
-            "query": retrieval_query[:220],
+            "query": web_query[:220],
             "top_similarity": top_similarity,
             "vector_domain_count": vector_domain_count,
         },
@@ -2148,14 +2667,14 @@ async def _retrieve_web_candidates_if_needed(
         emit_trace_event(
             "query_planner_started",
             {
-                "query": retrieval_query[:220],
+                "query": web_query[:220],
             },
         )
         if web_prefetch_task is not None:
             try:
                 web_result = await asyncio.wait_for(
                     web_prefetch_task,
-                    timeout=_web_retrieval_timeout_seconds(search_mode),
+                    timeout=_web_retrieval_timeout_seconds(search_mode, query=web_query),
                 )
             except asyncio.TimeoutError:
                 if not web_prefetch_task.done():
@@ -2164,8 +2683,8 @@ async def _retrieve_web_candidates_if_needed(
                     await web_prefetch_task
                 web_result = (
                     await _run_one_web_query_with_timeout(
-                        retrieval_query,
-                        top_k=settings.postgres.default_top_k,
+                        web_query,
+                        top_k=_default_retrieval_top_k(),
                         search_mode=search_mode,
                     )
                     or {}
@@ -2173,13 +2692,15 @@ async def _retrieve_web_candidates_if_needed(
         else:
             web_result = (
                 await _run_one_web_query_with_timeout(
-                    retrieval_query,
-                    top_k=settings.postgres.default_top_k,
+                    web_query,
+                    top_k=_default_retrieval_top_k(),
                     search_mode=search_mode,
                 )
                 or {}
             )
         web_result = web_result if isinstance(web_result, dict) else {}
+        web_timeout_count = 1 if _web_result_timed_out(web_result) else 0
+        timed_out_queries: list[str] = [web_query] if web_timeout_count else []
         verification = web_result.get("verification", {})
         verification = verification if isinstance(verification, dict) else {}
         web_required_coverage = _safe_float(verification.get("required_field_coverage"))
@@ -2212,7 +2733,7 @@ async def _retrieve_web_candidates_if_needed(
         web_results = _result_dicts(web_result.get("results", []))
         max_web_results = _max_context_results_for_mode(search_mode)
         expansion_queries = _web_expansion_queries(
-            base_query=retrieval_query,
+            base_query=web_query,
             state=state,
             low_similarity=low_similarity,
             insufficient_domains=insufficient_domains,
@@ -2227,7 +2748,7 @@ async def _retrieve_web_candidates_if_needed(
         )
         if recovery_needed:
             recovery_queries = _web_expansion_queries(
-                base_query=retrieval_query,
+                base_query=web_query,
                 state=state,
                 low_similarity=True,
                 insufficient_domains=True,
@@ -2265,9 +2786,13 @@ async def _retrieve_web_candidates_if_needed(
                 asyncio.create_task(
                     _run_one_web_query_with_timeout(
                         expansion_query,
-                        top_k=settings.postgres.default_top_k,
-                        # Expansion fan-out should be lightweight even during deep mode.
-                        search_mode=_FAST_MODE if deep_mode else search_mode,
+                        top_k=_default_retrieval_top_k(),
+                        # Keep high-precision admissions expansion in deep mode for better exact-field recall.
+                        search_mode=(
+                            search_mode
+                            if (deep_mode and _is_admissions_requirements_query(state))
+                            else (_FAST_MODE if deep_mode else search_mode)
+                        ),
                     )
                 )
                 for expansion_query in expansion_queries
@@ -2277,6 +2802,12 @@ async def _retrieve_web_candidates_if_needed(
                 if isinstance(expansion_result, Exception) or not isinstance(
                     expansion_result, dict
                 ):
+                    continue
+                if _web_result_timed_out(expansion_result):
+                    web_timeout_count += 1
+                    timeout_query = " ".join(str(expansion_result.get("_query", "")).split()).strip()
+                    if timeout_query:
+                        timed_out_queries.append(timeout_query)
                     continue
                 rows = _result_dicts(expansion_result.get("results", []))
                 extra_results = _merge_retrieval_results(
@@ -2300,6 +2831,75 @@ async def _retrieve_web_candidates_if_needed(
                 },
             )
 
+        if deep_mode and not web_results and web_timeout_count > 0:
+            rescue_queries = _timeout_rescue_queries(base_query=web_query, state=state)
+            if rescue_queries:
+                emit_trace_event(
+                    "web_timeout_rescue_started",
+                    {
+                        "query_variants": rescue_queries,
+                        "timeout_count": web_timeout_count,
+                    },
+                )
+                rescue_results: list[dict] = []
+                rescue_tasks = [
+                    asyncio.create_task(
+                        _run_one_web_query_with_timeout(
+                            rescue_query,
+                            top_k=_default_retrieval_top_k(),
+                            search_mode=_FAST_MODE,
+                        )
+                    )
+                    for rescue_query in rescue_queries
+                ]
+                gathered_rescue = await asyncio.gather(*rescue_tasks, return_exceptions=True)
+                for rescue_result in gathered_rescue:
+                    if isinstance(rescue_result, Exception) or not isinstance(rescue_result, dict):
+                        continue
+                    if _web_result_timed_out(rescue_result):
+                        web_timeout_count += 1
+                        timeout_query = " ".join(str(rescue_result.get("_query", "")).split()).strip()
+                        if timeout_query:
+                            timed_out_queries.append(timeout_query)
+                        continue
+                    rows = _result_dicts(rescue_result.get("results", []))
+                    rescue_results = _merge_retrieval_results(
+                        rescue_results,
+                        rows,
+                        limit=max_web_results,
+                    )
+                if rescue_results:
+                    state["web_timeout_rescued"] = True
+                    state["web_expansion_used"] = True
+                    web_results = _merge_retrieval_results(
+                        web_results,
+                        rescue_results,
+                        limit=max_web_results,
+                    )
+                emit_trace_event(
+                    "web_timeout_rescue_completed",
+                    {
+                        "query_count": len(rescue_queries),
+                        "rescued_result_count": len(web_results),
+                        "timeout_count": web_timeout_count,
+                    },
+                )
+
+        if web_timeout_count > 0:
+            deduped_timeout_queries: list[str] = []
+            seen_timeout_queries: set[str] = set()
+            for timeout_query in timed_out_queries:
+                compact = " ".join(str(timeout_query).split()).strip()
+                if not compact:
+                    continue
+                key = compact.lower()
+                if key in seen_timeout_queries:
+                    continue
+                seen_timeout_queries.add(key)
+                deduped_timeout_queries.append(compact)
+            state["web_timeout_count"] = int(state.get("web_timeout_count", 0) or 0) + web_timeout_count
+            state["web_timed_out_queries"] = deduped_timeout_queries[:6]
+
         state["web_result_count"] = len(web_results)
         web_urls = _traceable_urls(_evidence_urls(web_results))
         emit_trace_event(
@@ -2312,6 +2912,9 @@ async def _retrieve_web_candidates_if_needed(
                 "retrieval_loop": web_result.get("retrieval_loop", {}),
                 "query_plan": web_result.get("query_plan", {}),
                 "verification": verification,
+                "timeout_count": web_timeout_count,
+                "timed_out_queries": (state.get("web_timed_out_queries") or [])[:4],
+                "timeout_rescued": bool(state.get("web_timeout_rescued", False)),
             },
         )
         if web_results:
@@ -2320,6 +2923,8 @@ async def _retrieve_web_candidates_if_needed(
             )
         elif vector_results:
             state["retrieval_strategy"] = "vector_only_after_web"
+        elif web_timeout_count > 0:
+            state["retrieval_strategy"] = "web_timeout_no_results"
         return web_results, True
     except Exception as web_exc:
         state["retrieval_strategy"] = "web_fallback_error"
@@ -2369,7 +2974,7 @@ def _merge_vector_and_web_results(
         return vector_results
 
     merge_limit = max(
-        int(settings.postgres.default_top_k),
+        int(_default_retrieval_top_k()),
         _max_context_results_for_mode(search_mode),
         int(settings.bedrock.reranker_max_documents),
     )
@@ -2391,7 +2996,7 @@ async def _rerank_if_configured(
     original_results = list(merged_results)
     min_unique_domains = max(1, int(getattr(settings.web_search, "retrieval_min_unique_domains", 1)))
     merge_limit = max(
-        int(settings.postgres.default_top_k),
+        int(_default_retrieval_top_k()),
         _max_context_results_for_mode(_mode_from_state(state)),
         int(settings.bedrock.reranker_max_documents),
     )
@@ -2554,6 +3159,9 @@ def _apply_grounded_retrieval_context(
     state["citation_min_hosts"] = max(1, min(len(evidence_hosts), min_unique_domains))
     state["citation_required"] = True
     if not evidence_urls:
+        if int(state.get("web_timeout_count", 0) or 0) > 0:
+            state["context_guard_reason"] = "web_retrieval_timeout"
+            return None, _WEB_RETRIEVAL_TIMEOUT_DETAIL
         if str(state.get("query_intent", "")).strip().lower() == "comparison" and merged_results:
             state["citation_required"] = False
             state["allow_uncited_comparison_fallback"] = True
@@ -2616,7 +3224,8 @@ async def _augment_messages_with_retrieval(
 ) -> tuple[list | None, str | None]:
     retrieval_started_at = time.perf_counter()
     web_prefetch_task: asyncio.Task | None = None
-    query_variants = _decompose_retrieval_queries(base_query=retrieval_query, state=state)
+    web_query = _compact_web_retrieval_query(base_query=retrieval_query, state=state) or retrieval_query
+    query_variants = _decompose_retrieval_queries(base_query=web_query, state=state)
     emit_trace_event(
         "retrieval_query_decomposed",
         {
@@ -2632,8 +3241,8 @@ async def _augment_messages_with_retrieval(
             # Fan-out: prefetch web retrieval while vector retrieval is in-flight.
             web_prefetch_task = asyncio.create_task(
                 _run_one_web_query_with_timeout(
-                    retrieval_query,
-                    top_k=settings.postgres.default_top_k,
+                    web_query,
+                    top_k=_default_retrieval_top_k(),
                     search_mode=search_mode,
                 )
             )
@@ -2654,9 +3263,14 @@ async def _augment_messages_with_retrieval(
             web_prefetch_task=web_prefetch_task,
         )
         if web_fallback_attempted and not web_results:
+            web_timeout_count = int(state.get("web_timeout_count", 0) or 0)
             freshness_sensitive = _is_freshness_sensitive_query(
                 str(state.get("safe_user_prompt", ""))
             )
+            if web_timeout_count > 0 and (not vector_results or not vector_has_urls):
+                state["context_guard_reason"] = "web_retrieval_timeout"
+                state["retrieval_strategy"] = "web_timeout_no_results"
+                return None, _WEB_RETRIEVAL_TIMEOUT_DETAIL
             if not vector_results:
                 if _is_citation_grounding_required() or freshness_sensitive:
                     state["context_guard_reason"] = "no_relevant_information"
@@ -2701,6 +3315,9 @@ async def _augment_messages_with_retrieval(
 def _validate_citation_grounding_state(state: dict) -> str | None:
     if not _is_citation_grounding_required():
         return None
+    if int(state.get("web_timeout_count", 0) or 0) > 0 and not state.get("evidence_urls"):
+        state["context_guard_reason"] = "web_retrieval_timeout"
+        return _WEB_RETRIEVAL_TIMEOUT_DETAIL
     if not bool(state.get("citation_required", False)):
         state["context_guard_reason"] = "weak_evidence_missing"
         return _NO_RELEVANT_INFORMATION_DETAIL
@@ -3162,6 +3779,7 @@ def _agentic_result_issues(result: str, state: dict) -> list[str]:
     evidence_urls = evidence_urls if isinstance(evidence_urls, list) else []
     required_fields = state.get("required_answer_fields")
     required_fields = required_fields if isinstance(required_fields, list) else []
+    admissions_critical_missing = _admissions_critical_web_fields_missing(state)
 
     if (
         citation_policy_enabled
@@ -3216,6 +3834,8 @@ def _agentic_result_issues(result: str, state: dict) -> list[str]:
         total_fields = len(required_fields)
         covered_fields = max(0, total_fields - len(missing_fields))
         coverage = float(covered_fields) / float(total_fields) if total_fields else 1.0
+        not_verified_mentions = _cache_not_verified_mentions(result)
+        state["not_verified_mentions"] = int(not_verified_mentions)
         state["required_fields_missing"] = missing_fields
         state["required_field_coverage"] = round(max(0.0, min(1.0, coverage)), 4)
         emit_trace_event(
@@ -3225,14 +3845,38 @@ def _agentic_result_issues(result: str, state: dict) -> list[str]:
                 "covered_count": covered_fields,
                 "coverage": state["required_field_coverage"],
                 "missing_fields": missing_fields[:5],
+                "not_verified_mentions": int(not_verified_mentions),
             },
         )
         if missing_fields:
             issues.append("missing_required_answer_fields")
             for field in missing_fields[:4]:
                 issues.append(f"missing:{field}")
+        max_not_verified = max(
+            1,
+            int(getattr(settings.web_search, "cache_max_not_verified_mentions", 3)),
+        )
+        if _is_admissions_requirements_query(state):
+            max_not_verified = min(max_not_verified, 1)
+        if not_verified_mentions > max_not_verified:
+            issues.append("too_many_unverified_fields")
         if total_fields and coverage <= 0.34:
             issues.append("query_not_addressed")
+    if result != _NO_RELEVANT_INFORMATION_DETAIL and admissions_critical_missing:
+        issues.append("web_required_fields_missing")
+        for field in admissions_critical_missing[:4]:
+            issues.append(f"web_missing:{field}")
+    if (
+        result != _NO_RELEVANT_INFORMATION_DETAIL
+        and _mode_from_state(state) == _DEEP_MODE
+        and _is_admissions_requirements_query(state)
+    ):
+        admissions_required = state.get("required_answer_fields")
+        admissions_required = admissions_required if isinstance(admissions_required, list) else []
+        if len(admissions_required) >= 3:
+            confidence = _safe_float(state.get("trust_confidence"))
+            if confidence is not None and confidence < _deep_answer_min_confidence():
+                issues.append("confidence_below_target")
     if result != _NO_RELEVANT_INFORMATION_DETAIL and bool(
         state.get("retrieval_single_domain_low_quality", False)
     ):
@@ -3242,6 +3886,8 @@ def _agentic_result_issues(result: str, state: dict) -> list[str]:
             issues.append("missing_deadline_date")
     if _has_contradiction_signal(result, state):
         issues.append("source_conflict_detected")
+    if result != _NO_RELEVANT_INFORMATION_DETAIL and _has_speculative_factual_language(result, state):
+        issues.append("speculative_factual_claim")
     if citation_policy_enabled and result == _NO_RELEVANT_INFORMATION_DETAIL and evidence_urls:
         issues.append("returned_no_relevant_information_with_available_evidence")
     if result != _NO_RELEVANT_INFORMATION_DETAIL and _is_generic_placeholder_response(
@@ -3326,7 +3972,9 @@ async def _generate_answer_plan(*, messages: list, state: dict) -> tuple[dict, d
     )
     try:
         response = await _call_model_with_fallback(
-            _build_answer_planner_messages(messages, state), state
+            _build_answer_planner_messages(messages, state),
+            state,
+            role="planner",
         )
     except Exception:
         emit_trace_event(
@@ -3440,6 +4088,7 @@ async def _verify_answer_with_llm(
                 round_number=round_number,
             ),
             state,
+            role="verifier",
         )
     except Exception:
         return None, {}, int(state.get("model_ms") or 0)
@@ -3478,6 +4127,438 @@ def _combined_verification_issues(base_issues: list[str], verifier: dict | None)
     return combined
 
 
+def _agentic_required_field_rescue_max_rounds() -> int:
+    configured = _safe_int(
+        getattr(settings.web_search, "agentic_required_field_rescue_max_rounds", 2)
+    )
+    if configured is None:
+        configured = 2
+    return max(0, min(3, int(configured)))
+
+
+def _issue_requests_required_field_rescue(issue: str) -> bool:
+    lowered = str(issue or "").strip().lower()
+    if not lowered:
+        return False
+    direct_markers = {
+        "missing_required_answer_fields",
+        "web_required_fields_missing",
+        "too_many_unverified_fields",
+        "missing_deadline_date",
+    }
+    if lowered in direct_markers:
+        return True
+    if lowered.startswith("missing:") or lowered.startswith("web_missing:"):
+        return True
+    if lowered.startswith("verifier:"):
+        body = lowered.split(":", 1)[1].strip()
+        return any(
+            marker in body
+            for marker in (
+                "missing",
+                "not address",
+                "not covered",
+                "deadline",
+                "portal",
+                "ielts",
+                "toefl",
+                "language",
+                "gpa",
+                "ects",
+                "credit",
+                "eligibility",
+                "requirement",
+            )
+        )
+    return False
+
+
+def _issue_missing_field_hint(issue: str) -> str:
+    lowered = str(issue or "").strip().lower()
+    if lowered.startswith("missing:") or lowered.startswith("web_missing:"):
+        return " ".join(lowered.split(":", 1)[1].split()).strip()
+    return ""
+
+
+def _required_field_focus_terms(field_hint: str) -> list[str]:
+    normalized = " ".join(str(field_hint or "").split()).strip().lower()
+    if not normalized:
+        return []
+    if "deadline" in normalized:
+        return ["application deadline exact date", "admission timeline date"]
+    if "portal" in normalized or "apply" in normalized:
+        return ["application portal link", "apply online portal"]
+    if "language" in normalized and any(token in normalized for token in ("score", "ielts", "toefl")):
+        return ["IELTS TOEFL minimum score", "language test threshold"]
+    if "language" in normalized:
+        return ["language requirement english german", "instruction language"]
+    if any(token in normalized for token in ("gpa", "grade", "cgpa")):
+        return ["minimum GPA grade threshold", "admission grade requirement"]
+    if any(token in normalized for token in ("ects", "credit", "prerequisite")):
+        return ["ECTS prerequisite credits", "credit breakdown requirement"]
+    if "eligibility" in normalized or "admission requirement" in normalized:
+        return ["eligibility admission requirements", "entry criteria requirements"]
+    if "document" in normalized:
+        return ["required documents checklist", "application documents official"]
+    return [normalized]
+
+
+def _normalize_domain_slug(text: str) -> str:
+    compact = str(text or "").strip().lower()
+    if not compact:
+        return ""
+    compact = (
+        compact.replace("ä", "ae")
+        .replace("ö", "oe")
+        .replace("ü", "ue")
+        .replace("ß", "ss")
+    )
+    compact = re.sub(r"[^a-z0-9]+", "-", compact).strip("-")
+    compact = re.sub(r"-{2,}", "-", compact)
+    return compact
+
+
+def _inferred_rescue_domains(text: str) -> list[str]:
+    compact = " ".join(str(text or "").split()).strip().lower()
+    if not compact:
+        return []
+    inferred: list[str] = []
+    seen: set[str] = set()
+
+    def _push(domain: str) -> None:
+        candidate = str(domain or "").strip().lower()
+        if not candidate or candidate in seen:
+            return
+        if not re.fullmatch(r"(?:[a-z0-9-]+\.)+(?:de|eu|edu|ac\.uk)", candidate):
+            return
+        seen.add(candidate)
+        inferred.append(candidate)
+
+    for domain in re.findall(r"\b(?:[a-z0-9-]+\.)+(?:de|eu|edu|ac\.uk)\b", compact):
+        _push(domain)
+
+    stopwords = {
+        "master",
+        "masters",
+        "m",
+        "msc",
+        "sc",
+        "program",
+        "programme",
+        "course",
+        "admission",
+        "requirements",
+        "deadline",
+        "application",
+        "language",
+        "ielts",
+        "toefl",
+        "gpa",
+        "ects",
+    }
+    pattern = re.compile(
+        r"\b(?:university|universit[a-z]*|uni)\s+(?:of\s+)?"
+        r"([a-z0-9äöüß-]+(?:\s+[a-z0-9äöüß-]+){0,2})",
+        flags=re.IGNORECASE,
+    )
+    for match in pattern.finditer(compact):
+        raw = " ".join(str(match.group(1) or "").split()).strip()
+        if not raw:
+            continue
+        tokens: list[str] = []
+        for token in re.findall(r"[a-z0-9äöüß-]+", raw):
+            lowered = token.lower()
+            if lowered in stopwords:
+                break
+            tokens.append(lowered)
+        if not tokens:
+            continue
+        slug = _normalize_domain_slug("-".join(tokens[:2]))
+        if not slug:
+            continue
+        _push(f"uni-{slug}.de")
+    return inferred
+
+
+def _rescue_site_hints(state: dict, *, base_query: str = "") -> list[str]:
+    hosts: list[str] = []
+    seen: set[str] = set()
+
+    def _push(host_or_domain: str) -> None:
+        normalized = _normalized_host_from_url(str(host_or_domain))
+        if not normalized:
+            normalized = str(host_or_domain or "").strip().lower()
+            if normalized.startswith("www."):
+                normalized = normalized[4:]
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        hosts.append(normalized)
+
+    evidence_urls = state.get("evidence_urls", [])
+    evidence_urls = evidence_urls if isinstance(evidence_urls, list) else []
+    for url in evidence_urls:
+        _push(str(url))
+        if len(hosts) >= 6:
+            break
+    if len(hosts) < 6:
+        for domain in _inferred_rescue_domains(base_query):
+            _push(domain)
+            if len(hosts) >= 6:
+                break
+    if len(hosts) < 6:
+        for domain in _inferred_rescue_domains(str(state.get("safe_user_prompt", ""))):
+            _push(domain)
+            if len(hosts) >= 6:
+                break
+    return hosts
+
+
+def _targeted_required_field_rescue_queries(*, base_query: str, state: dict, issues: list[str]) -> list[str]:
+    compact_base = _compact_web_retrieval_query(base_query=base_query, state=state) or str(base_query).strip()
+    if not compact_base:
+        return []
+    candidates: list[str] = [compact_base]
+    candidates.extend(_decompose_retrieval_queries(base_query=compact_base, state=state))
+
+    missing_hints: list[str] = []
+    required_missing = state.get("required_fields_missing", [])
+    required_missing = required_missing if isinstance(required_missing, list) else []
+    missing_hints.extend(str(item).strip() for item in required_missing if str(item).strip())
+    web_missing = state.get("web_required_fields_missing", [])
+    web_missing = web_missing if isinstance(web_missing, list) else []
+    missing_hints.extend(str(item).strip() for item in web_missing if str(item).strip())
+    for issue in issues:
+        hint = _issue_missing_field_hint(issue)
+        if hint:
+            missing_hints.append(hint)
+    if not missing_hints:
+        required_fields = state.get("required_answer_fields")
+        required_fields = required_fields if isinstance(required_fields, list) else []
+        missing_hints.extend(str(item).strip() for item in required_fields if str(item).strip())
+
+    focus_terms: list[str] = []
+    for hint in missing_hints[:6]:
+        focus_terms.extend(_required_field_focus_terms(hint))
+    deduped_focus: list[str] = []
+    seen_focus: set[str] = set()
+    for term in focus_terms:
+        compact = " ".join(str(term).split()).strip()
+        if not compact:
+            continue
+        key = compact.lower()
+        if key in seen_focus:
+            continue
+        seen_focus.add(key)
+        deduped_focus.append(compact)
+        if len(deduped_focus) >= 6:
+            break
+
+    for focus in deduped_focus:
+        candidates.append(f"{compact_base} official {focus}")
+    for host in _rescue_site_hints(state, base_query=compact_base)[:4]:
+        candidates.append(f"{compact_base} official site:{host}")
+        for focus in deduped_focus[:3]:
+            candidates.append(f"{compact_base} {focus} site:{host}")
+
+    max_gap_queries = max(1, int(getattr(settings.web_search, "retrieval_loop_max_gap_queries", 2)))
+    limit = max(8, min(18, max_gap_queries * 4))
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        compact = " ".join(str(candidate).split()).strip()
+        if not compact:
+            continue
+        key = compact.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(compact[:_WEB_QUERY_MAX_CHARS])
+        if len(normalized) >= limit:
+            break
+    return normalized
+
+
+def _should_attempt_required_field_web_rescue(issues: list[str], state: dict) -> bool:
+    if not issues:
+        return False
+    web_ready, _ = _web_retrieval_ready()
+    if not web_ready:
+        return False
+    required_fields = state.get("required_answer_fields")
+    required_fields = required_fields if isinstance(required_fields, list) else []
+    if not required_fields and not _admissions_missing_web_fields(state):
+        return False
+    return any(_issue_requests_required_field_rescue(issue) for issue in issues)
+
+
+async def _attempt_required_field_web_rescue(
+    *,
+    issues: list[str],
+    state: dict,
+    base_query: str,
+    search_mode: str,
+) -> tuple[list[dict], bool]:
+    queries = _targeted_required_field_rescue_queries(
+        base_query=base_query,
+        state=state,
+        issues=issues,
+    )
+    if not queries:
+        return [], False
+    emit_trace_event(
+        "agent_required_field_rescue_started",
+        {
+            "query_count": len(queries),
+            "issues": issues[:6],
+            "query_variants": queries[:8],
+        },
+    )
+
+    max_context_results = _max_context_results_for_mode(search_mode)
+    merge_limit = max(
+        max_context_results,
+        int(_default_retrieval_top_k()) * 2,
+        int(settings.bedrock.reranker_max_documents),
+    )
+    timeout_count = 0
+    timed_out_queries: list[str] = []
+    rescued_rows: list[dict] = []
+    best_coverage: float | None = None
+    best_missing: list[str] = []
+    verified_values: list[bool] = []
+
+    tasks = [
+        asyncio.create_task(
+            _run_one_web_query_with_timeout(
+                query,
+                top_k=_default_retrieval_top_k(),
+                search_mode=search_mode,
+            )
+        )
+        for query in queries
+    ]
+    gathered = await asyncio.gather(*tasks, return_exceptions=True)
+    for item in gathered:
+        if isinstance(item, Exception) or not isinstance(item, dict):
+            continue
+        if _web_result_timed_out(item):
+            timeout_count += 1
+            timeout_query = " ".join(str(item.get("_query", "")).split()).strip()
+            if timeout_query:
+                timed_out_queries.append(timeout_query)
+            continue
+        verification = item.get("verification", {})
+        verification = verification if isinstance(verification, dict) else {}
+        coverage = _safe_float(verification.get("required_field_coverage"))
+        if coverage is not None:
+            coverage = _clamp01(coverage, fallback=1.0)
+            if best_coverage is None or coverage > best_coverage:
+                best_coverage = coverage
+        missing = verification.get("required_fields_missing", [])
+        if isinstance(missing, list):
+            normalized_missing = [
+                " ".join(str(value).split()).strip()
+                for value in missing
+                if " ".join(str(value).split()).strip()
+            ]
+            if not best_missing or len(normalized_missing) < len(best_missing):
+                best_missing = normalized_missing[:6]
+        verified = verification.get("verified")
+        if isinstance(verified, bool):
+            verified_values.append(verified)
+        rescued_rows = _merge_retrieval_results(
+            rescued_rows,
+            _result_dicts(item.get("results", [])),
+            limit=merge_limit,
+        )
+
+    if timeout_count > 0:
+        state["web_timeout_count"] = int(state.get("web_timeout_count", 0) or 0) + timeout_count
+        existing_timeouts = state.get("web_timed_out_queries", [])
+        existing_timeouts = existing_timeouts if isinstance(existing_timeouts, list) else []
+        deduped: list[str] = []
+        seen_timeout: set[str] = set()
+        for timeout_query in existing_timeouts + timed_out_queries:
+            compact = " ".join(str(timeout_query).split()).strip()
+            if not compact:
+                continue
+            key = compact.lower()
+            if key in seen_timeout:
+                continue
+            seen_timeout.add(key)
+            deduped.append(compact)
+            if len(deduped) >= 8:
+                break
+        state["web_timed_out_queries"] = deduped
+    if best_coverage is not None:
+        state["web_required_field_coverage"] = round(best_coverage, 4)
+    if best_missing:
+        state["web_required_fields_missing"] = best_missing
+    if verified_values:
+        state["web_retrieval_verified"] = any(verified_values)
+    state["web_fallback_attempted"] = True
+
+    if not rescued_rows:
+        emit_trace_event(
+            "agent_required_field_rescue_completed",
+            {
+                "rescued": False,
+                "query_count": len(queries),
+                "timeout_count": timeout_count,
+            },
+        )
+        return [], False
+
+    previous_results = state.get("retrieved_results", [])
+    previous_results = previous_results if isinstance(previous_results, list) else []
+    merged_results = _merge_retrieval_results(previous_results, rescued_rows, limit=merge_limit)
+    merged_results = await _rerank_if_configured(base_query, merged_results, state)
+    merged_results = _selective_retrieval_results(merged_results, state)
+    context_messages, detail = _apply_grounded_retrieval_context(
+        messages=[],
+        merged_results=merged_results,
+        used_web_results=True,
+        state=state,
+    )
+    if detail:
+        emit_trace_event(
+            "agent_required_field_rescue_completed",
+            {
+                "rescued": False,
+                "reason": "context_detail_guard",
+                "detail": str(detail)[:180],
+            },
+        )
+        return [], False
+    context_messages = context_messages if isinstance(context_messages, list) else []
+    if not context_messages:
+        emit_trace_event(
+            "agent_required_field_rescue_completed",
+            {
+                "rescued": False,
+                "reason": "empty_context_messages",
+            },
+        )
+        return [], False
+    strategy = str(state.get("retrieval_strategy", "")).strip()
+    state["retrieval_strategy"] = (
+        f"{strategy}_required_field_rescue" if strategy else "required_field_rescue"
+    )
+    emit_trace_event(
+        "agent_required_field_rescue_completed",
+        {
+            "rescued": True,
+            "query_count": len(queries),
+            "rescue_result_count": len(rescued_rows),
+            "merged_result_count": len(merged_results),
+            "source_count": int(state.get("retrieval_source_count", 0) or 0),
+            "required_field_coverage": state.get("web_required_field_coverage"),
+        },
+    )
+    return context_messages, True
+
+
 def _agentic_reflection_message(
     issues: list[str], round_number: int, verifier: dict | None = None
 ) -> dict:
@@ -3494,6 +4575,89 @@ def _agentic_reflection_message(
             f"Fix: {compact}. Use only allowed evidence URLs and keep claims verifiable.{extra}"
         ),
     }
+
+
+def _build_answer_finalizer_messages(*, candidate: str, state: dict, plan: dict) -> list[dict]:
+    query = str(state.get("safe_user_prompt", "")).strip()[:400]
+    evidence_urls = _traceable_urls(state.get("evidence_urls", []), limit=10)
+    lines = [
+        f"User query: {query}",
+        f"Draft answer to finalize: {str(candidate)[:1500]}",
+        f"Plan intent: {str(plan.get('intent', '')).strip()[:220]}",
+        "Allowed evidence URLs:",
+    ]
+    if evidence_urls:
+        lines.extend(f"- {url}" for url in evidence_urls)
+    else:
+        lines.append("- (none)")
+    lines.append(
+        "Rewrite for clarity and structure only. Keep all factual claims strictly evidence-grounded."
+    )
+    lines.append("Do not invent facts, dates, thresholds, or links.")
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are an internal answer finalizer. Improve readability while preserving factual "
+                "correctness and citation grounding. Do not add unsupported claims."
+            ),
+        },
+        {"role": "user", "content": "\n".join(lines)[:2600]},
+    ]
+
+
+async def _finalize_candidate_with_llm(
+    *,
+    user_id: str,
+    candidate: str,
+    state: dict,
+    plan: dict,
+    attempt: int,
+) -> tuple[str, dict, int]:
+    finalizer_primary, _ = _model_ids_for_role("finalizer")
+    worker_primary, _ = _model_ids_for_role("worker", attempt=attempt)
+    if (
+        not finalizer_primary
+        or finalizer_primary == worker_primary
+        or candidate == _NO_RELEVANT_INFORMATION_DETAIL
+    ):
+        return "", {}, 0
+
+    emit_trace_event(
+        "answer_finalization_started",
+        {"model": finalizer_primary, "answer_preview": str(candidate)[:220]},
+    )
+    try:
+        response = await _call_model_with_fallback(
+            _build_answer_finalizer_messages(candidate=candidate, state=state, plan=plan),
+            state,
+            role="finalizer",
+        )
+    except Exception:
+        emit_trace_event(
+            "answer_finalization_completed",
+            {"changed": False, "reason": "finalizer_call_failed"},
+        )
+        return "", {}, int(state.get("model_ms") or 0)
+
+    usage = _extract_llm_usage(response)
+    finalized = _extract_guarded_result(
+        user_id=user_id,
+        raw_result=response.choices[0].message.content,
+        state=state,
+    )
+    if not str(finalized or "").strip():
+        emit_trace_event(
+            "answer_finalization_completed",
+            {"changed": False, "reason": "empty_finalizer_output"},
+        )
+        return "", usage, int(state.get("model_ms") or 0)
+    changed = str(finalized).strip() != str(candidate).strip()
+    emit_trace_event(
+        "answer_finalization_completed",
+        {"changed": changed, "answer_preview": str(finalized)[:220]},
+    )
+    return finalized, usage, int(state.get("model_ms") or 0)
 
 
 def _has_authoritative_evidence(state: dict) -> bool:
@@ -3529,6 +4693,25 @@ def _is_generic_placeholder_response(answer: str, state: dict) -> bool:
     return False
 
 
+def _has_speculative_factual_language(answer: str, state: dict) -> bool:
+    if not _is_admissions_requirements_query(state):
+        return False
+    text = " ".join(str(answer or "").split()).strip()
+    if not text:
+        return False
+    for sentence in _SENTENCE_SPLIT_RE.split(text):
+        lowered = sentence.lower().strip()
+        if not lowered:
+            continue
+        if "not verified from sources" in lowered or "not verified from evidence" in lowered:
+            continue
+        if not _SPECULATIVE_FACTUAL_CLAIM_RE.search(lowered):
+            continue
+        if _SPECULATIVE_FACTUAL_FIELD_RE.search(lowered):
+            return True
+    return False
+
+
 def _issues_include_query_not_answered(issues: list[str]) -> bool:
     for issue in issues:
         lowered = str(issue).strip().lower()
@@ -3543,8 +4726,51 @@ def _issues_include_query_not_answered(issues: list[str]) -> bool:
     return False
 
 
+def _allow_partial_admissions_answer(*, issues: list[str], result: str, state: dict) -> bool:
+    if not _is_admissions_requirements_query(state):
+        return False
+    if not str(result or "").strip() or str(result or "").strip() == _NO_RELEVANT_INFORMATION_DETAIL:
+        return False
+    evidence_urls = state.get("evidence_urls", [])
+    evidence_urls = evidence_urls if isinstance(evidence_urls, list) else []
+    if not evidence_urls:
+        return False
+    if _issues_include_query_not_answered(issues):
+        return False
+    if _has_speculative_factual_language(result, state):
+        return False
+    if "missing_allowed_citations" in {str(item).strip().lower() for item in issues}:
+        return False
+    required_coverage = _safe_float(state.get("required_field_coverage"))
+    web_coverage = _safe_float(state.get("web_required_field_coverage"))
+    coverages = [value for value in (required_coverage, web_coverage) if value is not None]
+    if not coverages:
+        return False
+    mode = _mode_from_state(state)
+    min_coverage = 0.65 if mode == _DEEP_MODE else 0.45
+    if max(coverages) < min_coverage:
+        return False
+    # When deep search exhausted or timed out, return best-evidence partial instead of hard abstaining.
+    if mode == _DEEP_MODE:
+        timed_out = int(state.get("web_timeout_count", 0) or 0) > 0
+        rescue_rounds = int(state.get("agent_required_field_rescue_rounds", 0) or 0)
+        rescue_budget = _agentic_required_field_rescue_max_rounds()
+        if (
+            not timed_out
+            and bool(_admissions_critical_web_fields_missing(state))
+            and rescue_budget > 0
+            and rescue_rounds < rescue_budget
+        ):
+            return False
+        if not timed_out and not bool(state.get("web_fallback_attempted", False)):
+            return False
+    return True
+
+
 def _is_hard_verification_failure(issues: list[str], result: str, state: dict) -> bool:
     if result == _NO_RELEVANT_INFORMATION_DETAIL:
+        return True
+    if _has_speculative_factual_language(result, state):
         return True
     has_authoritative = _has_authoritative_evidence(state)
     evidence_urls = state.get("evidence_urls", [])
@@ -3556,7 +4782,17 @@ def _is_hard_verification_failure(issues: list[str], result: str, state: dict) -
             return True
     if _issues_include_query_not_answered(issues):
         return True
-    hard_markers = ("weak_evidence",)
+    allow_partial_admissions = _allow_partial_admissions_answer(
+        issues=issues,
+        result=result,
+        state=state,
+    )
+    hard_markers = (
+        "weak_evidence",
+        "web_required_fields_missing",
+        "too_many_unverified_fields",
+        "speculative_factual_claim",
+    )
     for issue in issues:
         lowered = str(issue).strip().lower()
         if lowered == "missing_allowed_citations" and has_authoritative:
@@ -3566,6 +4802,13 @@ def _is_hard_verification_failure(issues: list[str], result: str, state: dict) -
         if (
             lowered in {"missing_evidence_snippets", "weak_claim_citation_linkage"}
             and has_authoritative
+        ):
+            continue
+        if allow_partial_admissions and (
+            lowered in {"web_required_fields_missing", "too_many_unverified_fields"}
+            or lowered.startswith("web_missing:")
+            or lowered in {"confidence_below_target", "missing_deadline_date"}
+            or lowered.startswith("missing:")
         ):
             continue
         if lowered in {"missing_allowed_citations", "insufficient_source_diversity"}:
@@ -3592,10 +4835,16 @@ def _candidate_quality_score(candidate: str, issues: list[str], state: dict) -> 
 
 
 def _derive_abstain_reason(result: str, state: dict) -> str:
-    if str(result or "").strip() != _NO_RELEVANT_INFORMATION_DETAIL:
+    normalized_result = str(result or "").strip()
+    if normalized_result == _WEB_RETRIEVAL_TIMEOUT_DETAIL:
+        return "web_timeout"
+    if normalized_result != _NO_RELEVANT_INFORMATION_DETAIL:
         return ""
 
     output_guard_reason = str(state.get("output_guard_reason", "")).strip().lower()
+    context_guard_reason = str(state.get("context_guard_reason", "")).strip().lower()
+    if output_guard_reason == "web_retrieval_timeout" or context_guard_reason == "web_retrieval_timeout":
+        return "web_timeout"
     if output_guard_reason in {"agent_verification_failed", "stream_verification_failed"}:
         return "verifier_blocked"
     if output_guard_reason in {"weak_evidence_no_urls", "weak_evidence_missing"}:
@@ -3637,8 +4886,11 @@ async def _generate_agentic_answer(
     state: dict,
 ) -> tuple[str, dict]:
     max_attempts = max(1, int(policy.get("max_attempts", 1)))
+    attempt_limit = max_attempts
     planner_enabled = bool(policy.get("planner_enabled", False))
     verifier_enabled = bool(policy.get("verifier_enabled", False))
+    rescue_max_rounds = _agentic_required_field_rescue_max_rounds()
+    rescue_rounds = 0
     attempt = 0
     model_ms_total = 0
     llm_usage_total: dict = {}
@@ -3665,7 +4917,7 @@ async def _generate_agentic_answer(
         emit_trace_event("answer_planning_skipped", {"reason": "mode_policy"})
     working_messages = working_messages + [_answer_plan_message(plan)]
 
-    while attempt < max_attempts:
+    while attempt < attempt_limit:
         attempt += 1
         emit_trace_event(
             "model_round_started",
@@ -3674,7 +4926,12 @@ async def _generate_agentic_answer(
                 "max_rounds": max_attempts,
             },
         )
-        response = await _call_model_with_fallback(working_messages, state)
+        response = await _call_model_with_fallback(
+            working_messages,
+            state,
+            role="worker",
+            attempt=attempt,
+        )
         model_ms_total += int(state.get("model_ms") or 0)
         llm_usage_total = _merge_llm_usage(llm_usage_total, _extract_llm_usage(response))
 
@@ -3735,7 +4992,28 @@ async def _generate_agentic_answer(
             )
         if not issues:
             break
-        if attempt >= max_attempts:
+
+        rescue_applied = False
+        if rescue_rounds < rescue_max_rounds and _should_attempt_required_field_web_rescue(
+            issues, state
+        ):
+            rescue_context_messages, rescue_applied = await _attempt_required_field_web_rescue(
+                issues=issues,
+                state=state,
+                base_query=str(state.get("safe_user_prompt", "")),
+                search_mode=_DEEP_MODE,
+            )
+            rescue_rounds += 1
+            state["agent_required_field_rescue_rounds"] = rescue_rounds
+            if rescue_applied:
+                if attempt_limit <= attempt:
+                    attempt_limit = attempt + 1
+                working_messages = working_messages + [
+                    {"role": "assistant", "content": str(candidate)},
+                    _agentic_reflection_message(issues, attempt + 1, verifier),
+                ] + rescue_context_messages
+                continue
+        if attempt >= attempt_limit:
             break
 
         working_messages = working_messages + [
@@ -3745,8 +5023,32 @@ async def _generate_agentic_answer(
 
     state["model_ms"] = model_ms_total
     state["agent_rounds"] = attempt
-    final_result = best_result if best_result else final_result
-    final_issues = best_issues if best_issues else final_issues
+    state["agent_required_field_rescue_rounds"] = rescue_rounds
+    finalized_result, finalizer_usage, finalizer_model_ms = await _finalize_candidate_with_llm(
+        user_id=user_id,
+        candidate=best_result if best_result else final_result,
+        state=state,
+        plan=plan,
+        attempt=attempt,
+    )
+    model_ms_total += finalizer_model_ms
+    llm_usage_total = _merge_llm_usage(llm_usage_total, finalizer_usage)
+    if finalized_result:
+        finalized_issues = _agentic_result_issues(finalized_result, state)
+        if _candidate_quality_score(finalized_result, finalized_issues, state) < _candidate_quality_score(
+            best_result if best_result else final_result,
+            best_issues if best_issues else final_issues,
+            state,
+        ):
+            final_result = finalized_result
+            final_issues = finalized_issues
+        else:
+            final_result = best_result if best_result else final_result
+            final_issues = best_issues if best_issues else final_issues
+    else:
+        final_result = best_result if best_result else final_result
+        final_issues = best_issues if best_issues else final_issues
+    state["model_ms"] = model_ms_total
     if final_issues and str(state.get("query_intent", "")).strip().lower() == "comparison":
         structured_comparison = _build_structured_comparison_from_evidence(state)
         if structured_comparison:
@@ -3924,6 +5226,9 @@ def _new_metrics_state() -> dict:
         "web_retrieval_verified": None,
         "web_required_field_coverage": None,
         "web_required_fields_missing": [],
+        "web_timeout_count": 0,
+        "web_timed_out_queries": [],
+        "web_timeout_rescued": False,
         "retrieval_reranker_applied": False,
         "retrieval_reranker_ms": None,
         "retrieval_selective_before_count": 0,
@@ -3960,6 +5265,7 @@ def _new_metrics_state() -> dict:
         "quality": {},
         "agentic_enabled": _agentic_enabled(),
         "agent_rounds": 0,
+        "agent_required_field_rescue_rounds": 0,
         "agent_last_issues": [],
         "abstain_reason": "",
         "requested_mode": _DEFAULT_EXECUTION_MODE,
@@ -3970,6 +5276,7 @@ def _new_metrics_state() -> dict:
         "output_guard_reason": "",
         "safe_user_prompt": "",
         "used_fallback_model": False,
+        "role_model_ids": {},
     }
 
 
@@ -4043,6 +5350,7 @@ async def _prepare_messages_for_model(
     prefetched_vector_result: dict | None = None
     if (
         _retrieval_fanout_enabled()
+        and bool(getattr(settings.postgres, "enabled", False))
         and not _truthy_env(_RETRIEVAL_DISABLED_ENV)
         and str(safe_user_prompt).strip()
     ):
@@ -4050,7 +5358,7 @@ async def _prepare_messages_for_model(
         vector_prefetch_task = asyncio.create_task(
             aretrieve_document_chunks(
                 str(safe_user_prompt),
-                top_k=settings.postgres.default_top_k,
+                top_k=_default_retrieval_top_k(),
             )
         )
     messages = await build_context(conversation_user_id, safe_user_prompt)
@@ -4100,7 +5408,8 @@ async def _prepare_messages_for_model(
                 "content": (
                     "Date-answer policy: when the user asks for deadlines/dates, "
                     "return exact date values from evidence with URL citations. "
-                    f"If exact dates are absent, answer exactly: {_NO_RELEVANT_INFORMATION_DETAIL}"
+                    "If exact dates are absent, explicitly write: "
+                    '"Application deadline: Not verified from sources."'
                 ),
             }
         )
@@ -4115,6 +5424,9 @@ async def _prepare_messages_for_model(
     required_fields_message = _required_fields_system_message(state)
     if required_fields_message:
         messages = _insert_system_message_before_dialog(messages, required_fields_message)
+    admissions_schema_message = _admissions_answer_schema_message(state)
+    if admissions_schema_message:
+        messages = _insert_system_message_before_dialog(messages, admissions_schema_message)
     messages = _insert_system_message_before_dialog(
         messages,
         _answer_style_instruction_message(execution_mode, state),
@@ -4136,15 +5448,47 @@ async def _prepare_messages_for_model(
     return None, refusal
 
 
-async def _call_model_with_fallback(messages: list, state: dict):
+async def _call_model_by_id(messages: list, *, model_id: str):
+    normalized = _normalized_model_id(model_id)
+    if not normalized:
+        raise RuntimeError("Model id is required.")
+    if normalized == _normalized_model_id(settings.bedrock.primary_model_id):
+        return await _call_primary(messages)
+    if normalized == _normalized_model_id(settings.bedrock.fallback_model_id):
+        return await _call_fallback(messages)
+    return await _chat_completion(messages, model_id=normalized)
+
+
+async def _call_model_with_fallback(
+    messages: list,
+    state: dict,
+    *,
+    role: str = "worker",
+    attempt: int = 1,
+):
+    primary_model_id, fallback_model_id = _model_ids_for_role(role, attempt=attempt)
+    role_model_ids = state.get("role_model_ids")
+    if not isinstance(role_model_ids, dict):
+        role_model_ids = {}
+    role_model_ids[str(role)] = {
+        "primary": primary_model_id,
+        "fallback": fallback_model_id,
+    }
+    state["role_model_ids"] = role_model_ids
     model_started_at = time.perf_counter()
     try:
-        response = await _call_primary(messages)
+        response = await _call_model_by_id(messages, model_id=primary_model_id)
     except Exception as primary_exc:
         state["used_fallback_model"] = True
-        logger.warning("Primary model failed; attempting fallback. %s", primary_exc)
+        logger.warning(
+            "Primary model failed; attempting fallback. role=%s primary=%s fallback=%s error=%s",
+            role,
+            primary_model_id,
+            fallback_model_id,
+            primary_exc,
+        )
         try:
-            response = await _call_fallback(messages)
+            response = await _call_model_by_id(messages, model_id=fallback_model_id)
         except Exception:
             logger.exception("Fallback model also failed.")
             state["model_ms"] = _elapsed_ms(model_started_at)
@@ -4168,7 +5512,12 @@ def _extract_guarded_result(*, user_id: str, raw_result, state: dict) -> str:
         return grounded_result
     if bool(state.get("deadline_query", False)) and not _has_date_like_value(grounded_result):
         state["output_guard_reason"] = "deadline_missing_date"
-        return _NO_RELEVANT_INFORMATION_DETAIL
+        lowered = grounded_result.lower()
+        if _has_not_verified_marker(grounded_result) and "application deadline" in lowered:
+            return grounded_result
+        deadline_line = "Application deadline: Not verified from sources."
+        if "application deadline" not in lowered:
+            return f"{grounded_result.rstrip()}\n\n{deadline_line}".strip()
     return grounded_result
 
 
@@ -4238,6 +5587,7 @@ async def _refine_stream_draft(
                 _stream_refinement_message(state),
             ],
             state,
+            role="finalizer",
         )
         refined = _extract_guarded_result(
             user_id=user_id, raw_result=response.choices[0].message.content, state=state
@@ -4282,6 +5632,8 @@ def _cache_reject_reason_for_cached_text(cached_text: str) -> str:
         return "cached_no_relevant_information"
     if _NO_RELEVANT_INFORMATION_DETAIL.lower() in lowered:
         return "cached_no_relevant_information_variant"
+    if "web retrieval timed out while verifying official sources" in lowered:
+        return "cached_web_timeout"
     if text == refusal_response():
         return "cached_guardrail_refusal"
     if _is_generic_placeholder_response(text, {}):
@@ -4593,6 +5945,10 @@ async def _update_memory_with_timing(
 
 
 async def _write_cache_with_timing(*, cache_key: str, result: str, state: dict) -> None:
+    if not _response_cache_enabled():
+        state["cache_write_ms"] = 0
+        emit_trace_event("cache_write_skipped", {"reason": "response_cache_disabled"})
+        return
     started_at = time.perf_counter()
     try:
         skip_reason = _cache_skip_reason(result, state)
@@ -4997,31 +6353,35 @@ async def _prepare_request(
         str(context["effective_session_id"]),
         str(context["requested_mode"]),
     )
-    cached, state["cache_read_ms"] = await _read_cached_response(str(context["cache_key"]))
-    if cached:
-        cached_text = str(cached)
-        reject_reason = _cache_reject_reason_for_cached_text(cached_text)
-        if reject_reason:
-            emit_trace_event(
-                "cache_hit_rejected",
-                {
-                    "reason": reject_reason,
-                    "answer_preview": cached_text[:260],
-                },
-            )
-            try:
-                await _redis_call(async_redis_client.delete, str(context["cache_key"]))
-            except RedisError as exc:
-                logger.warning("Redis cache delete failed. %s", exc)
-        else:
-            await _record_context_outcome(context, answer=cached_text, outcome="cache_hit")
-            emit_trace_event(
-                "cache_hit",
-                {
-                    "answer_preview": cached_text[:260],
-                },
-            )
-            return context, None, cached_text
+    if _response_cache_enabled():
+        cached, state["cache_read_ms"] = await _read_cached_response(str(context["cache_key"]))
+        if cached:
+            cached_text = str(cached)
+            reject_reason = _cache_reject_reason_for_cached_text(cached_text)
+            if reject_reason:
+                emit_trace_event(
+                    "cache_hit_rejected",
+                    {
+                        "reason": reject_reason,
+                        "answer_preview": cached_text[:260],
+                    },
+                )
+                try:
+                    await _redis_call(async_redis_client.delete, str(context["cache_key"]))
+                except RedisError as exc:
+                    logger.warning("Redis cache delete failed. %s", exc)
+            else:
+                await _record_context_outcome(context, answer=cached_text, outcome="cache_hit")
+                emit_trace_event(
+                    "cache_hit",
+                    {
+                        "answer_preview": cached_text[:260],
+                    },
+                )
+                return context, None, cached_text
+    else:
+        state["cache_read_ms"] = 0
+        emit_trace_event("cache_bypassed", {"reason": "response_cache_disabled"})
 
     messages, refusal = await _prepare_messages_for_model(
         user_id=user_id,
@@ -5032,7 +6392,7 @@ async def _prepare_request(
         state=state,
     )
     if (
-        refusal == _NO_RELEVANT_INFORMATION_DETAIL
+        refusal in {_NO_RELEVANT_INFORMATION_DETAIL, _WEB_RETRIEVAL_TIMEOUT_DETAIL}
         and str(context["requested_mode"]) == _AUTO_MODE
         and str(context["execution_mode"]) == _FAST_MODE
     ):

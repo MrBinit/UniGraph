@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { BrandIcon, BrandLogo } from "./Brand";
+import { BrandLogo } from "./Brand";
 import {
   CloseIcon,
   MoonIcon,
@@ -37,6 +37,7 @@ interface SidebarProps {
   onSelectConversation: (conversation: ConversationItem) => void;
   onToggleTheme: () => void;
   darkMode: boolean;
+  onLogout: () => void;
   mobileOpen: boolean;
   onCloseMobile: () => void;
 }
@@ -184,6 +185,7 @@ export function Sidebar({
   onSelectConversation,
   onToggleTheme,
   darkMode,
+  onLogout,
   mobileOpen,
   onCloseMobile,
 }: SidebarProps) {
@@ -208,16 +210,13 @@ export function Sidebar({
         onClick={onCloseMobile}
       />
       <aside
-        className={`fixed left-0 top-0 z-40 flex h-screen w-[260px] shrink-0 flex-col border-r border-blue-100 bg-[#f7fbff] p-4 shadow-xl shadow-blue-200/40 transition-transform dark:border-slate-800 dark:bg-slate-950 md:z-10 md:translate-x-0 md:shadow-none ${
+        className={`fixed left-0 top-0 z-40 flex h-screen w-[220px] shrink-0 flex-col border-r border-blue-100 bg-[#f7fbff] p-3 shadow-xl shadow-blue-200/40 transition-transform dark:border-slate-800 dark:bg-slate-950 md:z-10 md:translate-x-0 md:shadow-none ${
           mobileOpen ? "translate-x-0" : "-translate-x-full"
         }`}
       >
         <div>
-          <div className="mb-5 flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              <BrandIcon className="h-7 w-7 rounded-md" />
-              <BrandLogo compact />
-            </div>
+          <div className="mb-4 flex items-center justify-between">
+            <BrandLogo compact className="h-7 max-w-[124px]" />
             <button
               type="button"
               className="rounded-lg p-1.5 text-slate-500 hover:bg-blue-50 hover:text-brand-blue dark:text-slate-300 dark:hover:bg-slate-800 md:hidden"
@@ -228,7 +227,7 @@ export function Sidebar({
             </button>
           </div>
 
-          <div className="mb-3 flex items-center gap-2">
+          <div className="mb-2 flex items-center gap-2">
             <button
               type="button"
               onClick={onNewChat}
@@ -250,12 +249,12 @@ export function Sidebar({
             value={searchQuery}
             onChange={(event) => onSearchChange(event.target.value)}
             placeholder="Search conversations"
-            className="mb-4 w-full rounded-xl border border-blue-100 bg-white px-3 py-2 text-sm outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
+            className="mb-3 w-full rounded-xl border border-blue-100 bg-white px-3 py-2 text-sm outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100"
           />
           <select
             value={dateFilter}
             onChange={(event) => onDateFilterChange(event.target.value as ConversationDateFilter)}
-            className="mb-3 w-full rounded-xl border border-blue-100 bg-white px-3 py-2 text-xs text-slate-600 outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+            className="mb-2 w-full rounded-xl border border-blue-100 bg-white px-3 py-2 text-xs text-slate-600 outline-none focus:border-blue-300 focus:ring-2 focus:ring-blue-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
           >
             <option value="all">All dates</option>
             <option value="7d">Last 7 days</option>
@@ -363,7 +362,7 @@ export function Sidebar({
           </div>
         </div>
 
-        <div className="mt-4 space-y-2 border-t border-blue-100 pt-3 dark:border-slate-800">
+        <div className="mt-3 space-y-2 border-t border-blue-100 pt-3 dark:border-slate-800">
           <button
             type="button"
             className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-slate-700 hover:bg-blue-50 dark:text-slate-200 dark:hover:bg-slate-800"
@@ -379,6 +378,13 @@ export function Sidebar({
           >
             <SettingsIcon className="h-4 w-4" />
             Settings
+          </button>
+          <button
+            type="button"
+            onClick={onLogout}
+            className="flex w-full items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+          >
+            Logout
           </button>
 
           <div className="mt-2 flex items-center gap-3 rounded-2xl bg-white p-3 shadow dark:bg-slate-900">
