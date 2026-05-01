@@ -1,5 +1,6 @@
 import asyncio
 import hashlib
+import logging
 import pytest
 from app.services import llm_service
 
@@ -150,6 +151,70 @@ def test_truncate_query_safely_keeps_whole_words():
         "about university application",
         "about university application language",
     }
+
+
+def test_config_prompts_require_natural_synthesis_not_raw_dumping():
+    chat_prompts = llm_service.prompts["chat"]
+    prompt_text = "\n".join(
+        [
+            chat_prompts["mode_prompts"]["fast_system_prompt"],
+            chat_prompts["mode_prompts"]["deep_system_prompt"],
+            chat_prompts["system_prompt"],
+        ]
+    )
+
+    assert "Summarize evidence into clean" in prompt_text
+    assert "never dump raw retrieved chunks" in prompt_text.lower() or "never dump raw source snippets" in prompt_text.lower()
+    assert 'Never write "Not verified from official sources"' in prompt_text
+    assert "The retrieved official evidence does not state a specific IELTS band score." in prompt_text
+
+
+def test_runtime_answer_style_prompt_blocks_raw_internal_wording():
+    message = llm_service._answer_style_instruction_message(
+        "deep",
+        {"required_answer_fields": ["application_deadline", "ielts_score"]},
+    )
+    content = message["content"]
+
+    assert "Summarize retrieved evidence into natural wording" in content
+    assert "raw chunks" in content
+    assert "answered_fields" in content
+    assert "Never write 'Not verified from official sources'" in content
+
+
+@pytest.mark.asyncio
+async def test_finalize_success_logs_and_sanitizes_final_answer_path(monkeypatch, caplog):
+    async def noop_async(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(llm_service, "_update_memory_with_timing", noop_async)
+    monkeypatch.setattr(llm_service, "_write_cache_with_timing", noop_async)
+    monkeypatch.setattr(llm_service, "_record_success_metrics", noop_async)
+    monkeypatch.setattr(llm_service, "_schedule_evaluation_trace", lambda *_args, **_kwargs: None)
+
+    context = {
+        "state": {},
+        "conversation_user_id": "user-1",
+        "safe_user_prompt": "When is the deadline?",
+        "cache_key": "cache-key",
+        "user_id": "user-1",
+        "user_prompt": "When is the deadline?",
+        "request_id": "req-1",
+        "started_at": 0.0,
+        "effective_session_id": "session-1",
+    }
+    raw = "Application deadline: ### Application Periods Winter semester: 01 February - 31 May"
+
+    with caplog.at_level(logging.INFO, logger="app.services.llm_service"):
+        answer = await llm_service._finalize_success(context, raw)
+
+    assert "###" not in answer
+    assert context["state"]["final_answer_source"] == "llm_synthesis"
+    assert context["state"]["final_prompt_used"] is True
+    assert context["state"]["raw_span_rendered"] is True
+    assert "final_answer_before_sanitizer" in context["state"]
+    assert "final_answer_after_sanitizer" in context["state"]
+    assert "FinalAnswerPath" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -1091,13 +1156,13 @@ def test_structured_answer_cleans_noisy_deadline_ects_and_german_rows():
 
     assert answer.count("1 April - 15 May") == 1
     assert answer.count("15 October - 15 November") == 1
-    assert "ECTS / prerequisite credit breakdown: Not verified from official sources." in answer
+    assert "ECTS / prerequisite credit breakdown: The retrieved official evidence does not state this requested detail." in answer
     assert "2 ECTS; 4 ECTS; 12 ECTS" not in answer
     assert "For some of the master's programs" not in answer
     assert "DSH passed with at least grade 2" not in answer
     assert "TOEFL with a score of at least 80" not in answer
     assert "Language of instruction: German" not in answer
-    assert "IELTS/TOEFL thresholds: Not verified from official sources." in answer
+    assert "IELTS/TOEFL thresholds: The retrieved official evidence does not state a specific IELTS band score." in answer
 
 
 @pytest.mark.asyncio
@@ -1985,6 +2050,61 @@ async def test_retrieve_web_candidates_if_needed_recovers_with_timeout_rescue(mo
 
 
 @pytest.mark.asyncio
+async def test_retrieve_web_candidates_skips_rescue_after_unigraph_official_field(monkeypatch):
+    monkeypatch.setenv("WEB_SEARCH_API_KEY", "test-key")
+    monkeypatch.setattr(llm_service.settings.web_search, "enabled", True)
+    monkeypatch.setattr(llm_service.settings.web_search, "fallback_enabled", True)
+    monkeypatch.setattr(llm_service.settings.web_search, "always_web_retrieval_enabled", True)
+
+    async def fake_run_one_web_query_with_timeout(query: str, *, top_k: int, search_mode: str):
+        _ = top_k, search_mode
+        return {
+            "query": query,
+            "results": [
+                {
+                    "content": "Application deadline: 31 May.",
+                    "metadata": {"url": "https://www.tum.de/en/studies/degree-programs/detail/informatics-master-of-science-msc"},
+                }
+            ],
+            "unigraph_answered_required_field": True,
+            "coverage_ledger": [
+                {
+                    "field": "application_deadline",
+                    "status": "found",
+                    "value": "31 May",
+                    "source_type": "official",
+                    "source_url": "https://www.tum.de/en/studies/degree-programs/detail/informatics-master-of-science-msc",
+                }
+            ],
+        }
+
+    async def should_not_augment(*_args, **_kwargs):
+        raise AssertionError("german researcher rescue should not run after UniGraph answers")
+
+    monkeypatch.setattr(llm_service, "_run_one_web_query_with_timeout", fake_run_one_web_query_with_timeout)
+    monkeypatch.setattr(llm_service, "_augment_with_german_researcher", should_not_augment)
+
+    state = {
+        "safe_user_prompt": "When is the winter semester application deadline for MSc Informatics at TU Munich?",
+        "required_answer_fields": ["application_deadline"],
+    }
+    results, attempted = await llm_service._retrieve_web_candidates_if_needed(
+        state["safe_user_prompt"],
+        vector_results=[],
+        vector_has_urls=False,
+        top_similarity=None,
+        search_mode="deep",
+        state=state,
+        web_prefetch_task=None,
+    )
+
+    assert attempted is True
+    assert results
+    assert state["unigraph_answered_required_field"] is True
+    assert state["rescue_retrieval_skipped_reason"] == "unigraph_answered_required_field"
+
+
+@pytest.mark.asyncio
 async def test_generate_response_uses_vector_when_web_fallback_empty(monkeypatch):
     monkeypatch.setenv("WEB_SEARCH_API_KEY", "test-key")
     monkeypatch.setattr(llm_service.settings.web_search, "enabled", True)
@@ -2853,7 +2973,7 @@ def test_extract_guarded_result_deadline_missing_date_is_partial_not_abstain(mon
         state=state,
     )
     assert result != llm_service._NO_RELEVANT_INFORMATION_DETAIL
-    assert "Application deadline: Not verified from official sources." in result
+    assert "retrieved official evidence does not state a separate deadline" in result
     assert state["output_guard_reason"] == "deadline_missing_date"
 
 
@@ -3248,7 +3368,7 @@ def test_structured_field_evidence_answer_is_preferred_for_admissions_ledger():
     assert llm_service._should_prefer_structured_field_evidence_answer(state) is True
     answer = llm_service._build_structured_field_evidence_answer(state)
     assert "https://portal2.uni-mannheim.de/" in answer
-    assert "Application deadline: Not verified from official sources." in answer
+    assert "Application deadline: The retrieved official evidence does not state a separate deadline for this case." in answer
 
 
 def test_is_hard_verification_failure_for_admissions_missing_web_fields():
@@ -3591,3 +3711,34 @@ async def test_required_field_rescue_uses_fast_mode_when_base_mode_is_deep(monke
     assert rescued is False
     assert captured_modes
     assert all(mode == "fast" for mode in captured_modes)
+
+
+@pytest.mark.asyncio
+async def test_required_field_rescue_skips_when_unigraph_already_answered(monkeypatch):
+    async def should_not_query(*_args, **_kwargs):
+        raise AssertionError("required field rescue should not launch duplicate web queries")
+
+    monkeypatch.setattr(llm_service, "_run_one_web_query_with_timeout", should_not_query)
+
+    state = llm_service._new_metrics_state()
+    state["safe_user_prompt"] = "When is the winter semester application deadline for MSc Informatics at TU Munich?"
+    state["required_answer_fields"] = ["application_deadline"]
+    state["coverage_ledger"] = [
+        {
+            "field": "application_deadline",
+            "status": "found",
+            "value": "31 May",
+            "source_type": "official",
+        }
+    ]
+
+    messages, rescued = await llm_service._attempt_required_field_web_rescue(
+        issues=["web_missing:application_deadline"],
+        state=state,
+        base_query=state["safe_user_prompt"],
+        search_mode="deep",
+    )
+
+    assert messages == []
+    assert rescued is False
+    assert state["rescue_retrieval_skipped_reason"] == "unigraph_answered_required_field"

@@ -271,6 +271,7 @@ def test_chat_stream_serializes_decimal_trace_payload(monkeypatch):
             "status": "completed",
             "answer": "ok",
             "error": "",
+            "debug": {"query_decomposition": {"university": "TUM"}},
             "trace_events": [
                 {
                     "type": "search_started",
@@ -296,6 +297,8 @@ def test_chat_stream_serializes_decimal_trace_payload(monkeypatch):
     assert '"type": "trace"' in body
     assert '"step": 1' in body
     assert '"type":"done"' in body
+    assert '"type": "debug"' not in body
+    assert "query_decomposition" not in body
     assert '"type": "error"' not in body
 
 
@@ -379,6 +382,7 @@ def test_chat_status_includes_trace_events(monkeypatch):
             "completed_at": "2026-03-10T00:00:03+00:00",
             "answer": "done",
             "error": "",
+            "debug": {"query_decomposition": {"university": "TUM"}},
             "trace_events": [
                 {
                     "type": "search_results",
@@ -399,6 +403,7 @@ def test_chat_status_includes_trace_events(monkeypatch):
     payload = response.json()
     assert isinstance(payload.get("trace_events"), list)
     assert payload["trace_events"][0]["type"] == "search_results"
+    assert "debug" not in payload
 
 
 def test_route_matching_middleware_formats_404():

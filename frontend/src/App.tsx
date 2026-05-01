@@ -350,12 +350,9 @@ function traceThoughtDetails(event: TraceEventItem): string[] {
   const details: string[] = [];
 
   if (type === "query_plan_created" || type === "query_planner_completed") {
-    const planner = String(payload.planner ?? "").trim();
-    const llmUsed = typeof payload.llm_used === "boolean" ? payload.llm_used : undefined;
+    const planner = String(payload.planner_type ?? payload.planner ?? "").trim();
     if (planner) {
-      details.push(
-        `Planner: ${planner}${llmUsed === true ? " (llm)" : llmUsed === false ? " (heuristic)" : ""}`
-      );
+      details.push(`Planner: ${planner}`);
     }
     const queryLine = compactThoughtLine("Planner queries", normalizeTraceTextList(payload.queries, 4));
     if (queryLine) {

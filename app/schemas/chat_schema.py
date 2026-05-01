@@ -19,7 +19,7 @@ class ChatRequest(BaseModel):
     )
     prompt: str = Field(min_length=1, max_length=8000)
     mode: Literal["auto", "fast", "standard", "deep"] = "standard"
-    debug: bool = False
+    debug: bool = True
 
 
 class AsyncChatEnqueueResponse(BaseModel):

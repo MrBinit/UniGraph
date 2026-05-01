@@ -538,6 +538,7 @@ def _admissions_answer_schema_message(state: dict) -> dict | None:
         "language_test_score_thresholds",
     }:
         sections.append("IELTS/German Requirements")
+        sections.append("Language Requirements")
     if required_set & {
         "eligibility_requirements",
         "gpa_threshold",
@@ -553,6 +554,8 @@ def _admissions_answer_schema_message(state: dict) -> dict | None:
         }
         and "GPA and ECTS Requirements" not in sections
     ):
+        sections.append("Eligibility Requirements")
+    elif "eligibility_requirements" in required_set:
         sections.append("Eligibility Requirements")
     if (
         "application_deadline" in required_set
@@ -570,7 +573,7 @@ def _admissions_answer_schema_message(state: dict) -> dict | None:
         "career_outcomes",
     }:
         sections.append("Other Requested Details")
-    sections.extend(["Missing or Uncertain Information", "Sources"])
+    sections.append("Sources")
 
     seen_sections: set[str] = set()
     sections = [
@@ -638,7 +641,13 @@ def _admissions_answer_schema_message(state: dict) -> dict | None:
         lines.append(
             "- Do not include an Admission Competitiveness section unless explicitly requested."
         )
-    lines.append(f'- If a field is unavailable, write exactly: "{_NOT_VERIFIED_OFFICIAL_DETAIL}"')
+        lines.append(
+            "- Do not include an Admission Decision section unless explicitly requested."
+        )
+    lines.append(
+        "- If a requested field is unavailable, use natural field-specific wording; "
+        f'never write "{_NOT_VERIFIED_OFFICIAL_DETAIL}" in the final answer.'
+    )
     lines.append(
         "- Do not present 'related document', 'broader listing', or 'indicative' evidence as a verified critical admission fact."
     )
@@ -658,22 +667,35 @@ def _answer_style_instruction_message(mode: str, state: dict) -> dict:
 
     if str(mode).strip().lower() == _FAST_MODE:
         content = (
-            "Answer style policy (fast): concise and readable. Use short paragraphs or short bullets. "
-            "No internal scaffolding headings. Keep one final 'Sources' section with unique URLs only."
+            "Answer style policy (fast): concise, conversational, and readable. "
+            "Answer only the user's question, usually in one short paragraph for narrow deadline, "
+            "language, or tuition questions. Summarize evidence into clean wording; never paste raw "
+            "chunks, copied markdown headings, table fragments, internal field names, or coverage labels. "
+            "Never write 'Not verified from official sources' or 'Verified from selected evidence'. "
+            "If a requested detail is missing, say it naturally. Keep one final 'Sources' section with "
+            "unique URLs only when sources are shown."
         )
         return {"role": "system", "content": content}
 
     content = (
         "Answer style policy (deep):\n"
-        "- Start with a 1-2 sentence direct answer.\n"
-        "- Then use clear markdown sections only when relevant (for example: Language of Instruction, "
-        "IELTS/German Requirements, GPA and ECTS Requirements, Application Deadline, Application Portal, "
-        "Admission Competitiveness, Missing or Uncertain Information, Sources).\n"
+        "- Start with a direct, student-facing answer in 1-2 sentences.\n"
+        "- For narrow deadline, language, or tuition questions, use one short paragraph instead of sections.\n"
+        "- Use clear markdown sections only for broad, multi-field questions and only when relevant "
+        "(for example: Language, GPA and ECTS, Application Deadline, Application Portal, "
+        "Admission Competitiveness, Sources).\n"
         "- Use only sections requested by the query/required fields; do not pad with extra sections.\n"
         "- Ensure required fields are explicitly covered: "
         f"{required_text}.\n"
+        "- Summarize retrieved evidence into natural wording. Do not copy raw chunks, page headings, "
+        "markdown headings, table fragments, navigation text, or long snippets.\n"
+        "- Never print internal labels such as answered_fields, missing_fields, coverage ledger, "
+        "selected evidence, field completeness, or source status.\n"
+        "- Never write 'Not verified from official sources' or 'Verified from selected evidence'.\n"
+        "- If a requested detail is missing, use natural field-specific wording such as: "
+        "'The retrieved official evidence does not state a specific IELTS band score.'\n"
         "- Keep one fact per bullet and avoid duplicated lines.\n"
-        "- Prefer structured field lines over long paragraphs for admissions questions.\n"
+        "- Prefer clean synthesized field lines over long paragraphs for admissions questions.\n"
         "- Do not include an Admission Competitiveness section unless the user explicitly asks for admission likelihood, competitiveness, safety, or chances.\n"
         "- Never output internal ledger/coverage text such as 'Official evidence found for' or 'Requested fields'.\n"
         "- Add one inline URL citation to each factual bullet.\n"
@@ -1554,7 +1576,8 @@ def _required_fields_system_message(state: dict) -> dict | None:
     lines = [
         "Answer schema requirements:",
         "- Cover every required field below using evidence-backed facts.",
-        f'- If a required field cannot be verified, explicitly write: "{_NOT_VERIFIED_OFFICIAL_DETAIL}"',
+        "- If a requested field cannot be verified, use natural wording. Never write "
+        f'"{_NOT_VERIFIED_OFFICIAL_DETAIL}" in the final answer.',
         "- Prefer exact numbers/dates over generic wording when present in evidence.",
         "- For applicant-critical facts, do not use weak caveats like 'related document', 'indicative', or 'should be confirmed' as factual answers.",
         "- If exact official evidence is not tied to the requested program, mark the field as not verified instead of guessing.",
@@ -2944,6 +2967,44 @@ def _timeout_rescue_queries(*, base_query: str, state: dict) -> list[str]:
     return normalized
 
 
+def _unigraph_answered_official_required_field(
+    result: dict | None = None,
+    state: dict | None = None,
+) -> bool:
+    payloads: list[dict] = []
+    if isinstance(result, dict):
+        payloads.append(result)
+        if bool(result.get("unigraph_answered_required_field")):
+            return True
+    if isinstance(state, dict):
+        if bool(state.get("unigraph_answered_required_field")):
+            return True
+        payloads.append(state)
+
+    trusted_source_markers = {
+        "official",
+        "official_university_page",
+        "official_university_pdf",
+        "daad",
+        "uni_assist",
+        "government_or_eu",
+    }
+    for payload in payloads:
+        rows = payload.get("coverage_ledger") or payload.get("web_field_evidence") or []
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            status = " ".join(str(row.get("status", "")).split()).strip().lower()
+            if status != "found":
+                continue
+            source_type = " ".join(str(row.get("source_type", "")).split()).strip().lower()
+            if "official" in source_type or source_type in trusted_source_markers:
+                return True
+    return False
+
+
 async def _attempt_web_timeout_rescue(
     *,
     base_query: str,
@@ -2951,6 +3012,17 @@ async def _attempt_web_timeout_rescue(
     top_k: int,
     search_mode: str,
 ) -> dict | None:
+    if _unigraph_answered_official_required_field(state=state):
+        state["rescue_retrieval_skipped_reason"] = "unigraph_answered_required_field"
+        logger.info(
+            "Rescue retrieval skipped | rescue_retrieval_skipped_reason=%s",
+            state["rescue_retrieval_skipped_reason"],
+        )
+        emit_trace_event(
+            "rescue_retrieval_skipped",
+            {"reason": state["rescue_retrieval_skipped_reason"], "kind": "web_timeout"},
+        )
+        return None
     rescue_queries = _timeout_rescue_queries(base_query=base_query, state=state)
     if not rescue_queries:
         return None
@@ -3185,6 +3257,8 @@ async def _retrieve_web_candidates_if_needed(
     state["web_timed_out_queries"] = []
     state["web_timeout_rescued"] = False
     state["web_provider_error"] = ""
+    state["unigraph_answered_required_field"] = False
+    state["rescue_retrieval_skipped_reason"] = ""
     state["coverage_ledger"] = []
     state["unresolved_slots"] = []
     state["source_policy_decisions"] = []
@@ -3295,8 +3369,24 @@ async def _retrieve_web_candidates_if_needed(
             state["web_provider_error"] = " ".join(
                 str(web_result.get("_error_message", "")).split()
             ).strip()[:260]
+        unigraph_answered = _unigraph_answered_official_required_field(web_result, state)
+        if unigraph_answered:
+            state["unigraph_answered_required_field"] = True
+            state["rescue_retrieval_skipped_reason"] = "unigraph_answered_required_field"
+            logger.info(
+                "Rescue retrieval skipped | rescue_retrieval_skipped_reason=%s",
+                state["rescue_retrieval_skipped_reason"],
+            )
+            emit_trace_event(
+                "rescue_retrieval_skipped",
+                {
+                    "reason": state["rescue_retrieval_skipped_reason"],
+                    "kind": "web_primary",
+                    "query": web_query[:220],
+                },
+            )
         web_timeout_count = 1 if _web_result_timed_out(web_result) else 0
-        if web_timeout_count > 0 and not web_hard_error:
+        if web_timeout_count > 0 and not web_hard_error and not unigraph_answered:
             rescued_result = await _attempt_web_timeout_rescue(
                 base_query=web_query,
                 state=state,
@@ -3313,7 +3403,7 @@ async def _retrieve_web_candidates_if_needed(
             if isinstance(debug_payload, dict) and debug_payload:
                 state["unigraph_debug"] = debug_payload
 
-        if not web_hard_error:
+        if not web_hard_error and not unigraph_answered:
             web_result = await _augment_with_german_researcher(web_query, web_result, state)
 
         def _field_evidence_quality(rows: list[dict]) -> tuple[int, float]:
@@ -3481,6 +3571,10 @@ async def _retrieve_web_candidates_if_needed(
             if normalized_coverage:
                 state["coverage_ledger"] = normalized_coverage
                 state["web_field_evidence"] = normalized_coverage
+        if _unigraph_answered_official_required_field(web_result, state):
+            state["unigraph_answered_required_field"] = True
+            if not state.get("rescue_retrieval_skipped_reason"):
+                state["rescue_retrieval_skipped_reason"] = "unigraph_answered_required_field"
         unresolved_slots = web_result.get("unresolved_slots", [])
         if isinstance(unresolved_slots, list):
             state["unresolved_slots"] = [
@@ -3506,6 +3600,9 @@ async def _retrieve_web_candidates_if_needed(
             ][:20]
         coverage_summary = web_result.get("coverage_summary", {})
         coverage_summary = coverage_summary if isinstance(coverage_summary, dict) else {}
+        query_plan = web_result.get("query_plan", {})
+        if isinstance(query_plan, dict) and query_plan:
+            state["query_plan"] = dict(query_plan)
         summary_policy = " ".join(str(coverage_summary.get("source_policy", "")).split()).strip()
         if summary_policy and not state.get("web_source_policy"):
             state["web_source_policy"] = summary_policy
@@ -3522,7 +3619,7 @@ async def _retrieve_web_candidates_if_needed(
             ][:10]
         verification = web_result.get("verification", {})
         verification = verification if isinstance(verification, dict) else {}
-        query_plan = web_result.get("query_plan", {})
+        query_plan = query_plan if isinstance(query_plan, dict) else {}
         emit_trace_event(
             "query_planner_completed",
             {
@@ -3567,6 +3664,9 @@ async def _retrieve_web_candidates_if_needed(
                 "timeout_count": web_timeout_count,
                 "timed_out_queries": (state.get("web_timed_out_queries") or [])[:4],
                 "timeout_rescued": bool(state.get("web_timeout_rescued", False)),
+                "rescue_retrieval_skipped_reason": state.get(
+                    "rescue_retrieval_skipped_reason", ""
+                ),
                 "metrics": web_result.get("metrics", {}),
             },
         )
@@ -4428,7 +4528,9 @@ def _field_evidence_context_lines(field_evidence: list[dict], *, max_items: int)
         if not label:
             continue
         if status not in {"found", "conflict", "stale"}:
-            lines.append(f"- {label}: {_NOT_VERIFIED_OFFICIAL_DETAIL}")
+            lines.append(
+                f"- {label}: The retrieved official evidence does not state this requested detail."
+            )
         else:
             if status == "conflict":
                 value = value or "Conflict across official sources."
@@ -5619,6 +5721,17 @@ def _required_field_rescue_signature(state: dict) -> str:
 def _should_attempt_required_field_web_rescue(issues: list[str], state: dict) -> bool:
     if not issues:
         return False
+    if _unigraph_answered_official_required_field(state=state):
+        state["rescue_retrieval_skipped_reason"] = "unigraph_answered_required_field"
+        logger.info(
+            "Rescue retrieval skipped | rescue_retrieval_skipped_reason=%s",
+            state["rescue_retrieval_skipped_reason"],
+        )
+        emit_trace_event(
+            "rescue_retrieval_skipped",
+            {"reason": state["rescue_retrieval_skipped_reason"], "kind": "required_field"},
+        )
+        return False
     web_ready, _ = _web_retrieval_ready()
     if not web_ready:
         return False
@@ -5645,6 +5758,17 @@ async def _attempt_required_field_web_rescue(
     base_query: str,
     search_mode: str,
 ) -> tuple[list[dict], bool]:
+    if _unigraph_answered_official_required_field(state=state):
+        state["rescue_retrieval_skipped_reason"] = "unigraph_answered_required_field"
+        logger.info(
+            "Rescue retrieval skipped | rescue_retrieval_skipped_reason=%s",
+            state["rescue_retrieval_skipped_reason"],
+        )
+        emit_trace_event(
+            "rescue_retrieval_skipped",
+            {"reason": state["rescue_retrieval_skipped_reason"], "kind": "required_field"},
+        )
+        return [], False
     queries = _targeted_required_field_rescue_queries(
         base_query=base_query,
         state=state,
@@ -6641,6 +6765,8 @@ async def _generate_agentic_answer(
         ):
             final_result = structured_answer
             final_issues = structured_issues
+            state["final_answer_source"] = "field_renderer"
+            state["final_prompt_used"] = False
             emit_trace_event(
                 "answer_ledger_first_used",
                 {
@@ -6688,6 +6814,8 @@ async def _generate_agentic_answer(
                 ):
                     final_result = recovered
                     final_issues = recovered_issues
+                    state["final_answer_source"] = "fallback_builder"
+                    state["final_prompt_used"] = False
                     state["output_guard_reason"] = "agent_verification_partial"
                     emit_trace_event(
                         "answer_partial_with_field_evidence_recovery",
@@ -6888,6 +7016,8 @@ def _new_metrics_state() -> dict:
         "web_timeout_count": 0,
         "web_timed_out_queries": [],
         "web_timeout_rescued": False,
+        "unigraph_answered_required_field": False,
+        "rescue_retrieval_skipped_reason": "",
         "german_researcher_calls": 0,
         "german_researcher_cache_hits": 0,
         "german_research_cache_key": "",
@@ -7076,8 +7206,8 @@ async def _prepare_messages_for_model(
                 "content": (
                     "Date-answer policy: when the user asks for deadlines/dates, "
                     "return exact date values from evidence with URL citations. "
-                    "If exact dates are absent, explicitly write: "
-                    '"Application deadline: Not verified from official sources."'
+                    "If exact dates are absent, say naturally that the retrieved official "
+                    "evidence does not state a separate deadline for this case."
                 ),
             }
         )
@@ -7182,11 +7312,60 @@ def _extract_guarded_result(*, user_id: str, raw_result, state: dict) -> str:
         state["output_guard_reason"] = "deadline_missing_date"
         lowered = grounded_result.lower()
         if _has_not_verified_marker(grounded_result) and "application deadline" in lowered:
-            return grounded_result
-        deadline_line = "Application deadline: Not verified from official sources."
+            return grounded_result.replace(
+                _NOT_VERIFIED_OFFICIAL_DETAIL,
+                "The retrieved official evidence does not state a separate deadline for this case.",
+            )
+        deadline_line = (
+            "The retrieved official evidence does not state a separate deadline for this case."
+        )
         if "application deadline" not in lowered:
             return f"{grounded_result.rstrip()}\n\n{deadline_line}".strip()
     return grounded_result
+
+
+def _final_answer_has_raw_output(text: str) -> bool:
+    value = str(text or "")
+    lowered = value.lower()
+    if any(
+        marker in lowered
+        for marker in (
+            "###",
+            "[...]",
+            "not verified from official sources",
+            "verified in the retrieved official evidence",
+            "verified from selected evidence",
+            "answered_fields",
+            "missing_fields",
+        )
+    ):
+        return True
+    return bool(
+        re.search(
+            r"\b(?:Application deadline|Intake|Other semester deadline|IELTS score|GPA|Application portal):\s.{300,}",
+            value,
+            re.I | re.S,
+        )
+    )
+
+
+def _sanitize_final_user_answer(text: str) -> str:
+    value = str(text or "").strip()
+    replacements = {
+        "Not verified from official sources.": "The retrieved official evidence does not state this requested detail.",
+        "Not verified from official sources": "The retrieved official evidence does not state this requested detail",
+        "Verified in the retrieved official evidence.": "Stated in the retrieved official evidence.",
+        "Verified in the retrieved official evidence": "Stated in the retrieved official evidence",
+        "Verified from selected evidence.": "Stated in the retrieved official evidence.",
+        "Verified from selected evidence": "Stated in the retrieved official evidence",
+        "[...]": "",
+    }
+    for old, new in replacements.items():
+        value = value.replace(old, new)
+    value = re.sub(r"#{1,6}\s*", "", value)
+    value = re.sub(r"\b(answered_fields|missing_fields)\b", "", value, flags=re.I)
+    value = re.sub(r"\n{3,}", "\n\n", value)
+    return value.strip()
 
 
 def _should_refine_stream_draft(*, execution_mode: str, draft: str, state: dict) -> bool:
@@ -7751,6 +7930,39 @@ def _build_structured_field_evidence_answer(state: dict) -> str:
     }
     source_pool: list[str] = []
 
+    def _natural_missing_line(field_id: str) -> str:
+        normalized = str(field_id or "").strip().lower()
+        if normalized in {
+            "ielts_score",
+            "language_test_score_thresholds",
+            "language_test_thresholds",
+        }:
+            return "The retrieved official evidence does not state a specific IELTS band score."
+        if normalized in {
+            "application_deadline",
+            "international_deadline",
+            "other_semester_deadline",
+        }:
+            return "The retrieved official evidence does not state a separate deadline for this case."
+        if normalized in {
+            "required_application_documents",
+            "international_applicant_documents",
+            "degree_transcript_requirements",
+            "language_proof",
+        }:
+            return (
+                "The retrieved official evidence confirms the application route, but does not "
+                "show the full document checklist."
+            )
+        if normalized in {
+            "tuition_fee",
+            "semester_contribution",
+            "tuition_or_semester_fee",
+            "tuition_or_fees",
+        }:
+            return "The retrieved official evidence does not state the fee amount."
+        return "The retrieved official evidence does not state this requested detail."
+
     def _line(row: dict | None, label: str) -> str:
         row = row if isinstance(row, dict) else {}
         field_id = str(row.get("id", row.get("field", ""))).strip()
@@ -7762,6 +7974,7 @@ def _build_structured_field_evidence_answer(state: dict) -> str:
             _ledger_value_is_suspicious_ects(field_id, value)
             or _ledger_value_is_generic_german_requirement(field_id, value)
             or _ledger_row_is_bad_admissions_source(field_id, value, source_url, source_page_type)
+            or _NOT_VERIFIED_OFFICIAL_DETAIL.lower() in value.lower()
         ):
             status = "missing"
             value = ""
@@ -7774,13 +7987,13 @@ def _build_structured_field_evidence_answer(state: dict) -> str:
         if source_url and status in {"found", "conflict", "stale"}:
             source_pool.append(source_url)
         if status == "found":
-            line_value = value or "Verified from official sources."
+            line_value = value or "Stated in the retrieved official evidence."
         elif status == "conflict":
             line_value = "Conflict between official sources. Manual verification required."
         elif status == "stale":
             line_value = value or "Stale evidence. Refresh required for verification."
         else:
-            line_value = _NOT_VERIFIED_OFFICIAL_DETAIL
+            line_value = _natural_missing_line(field_id)
         citation = (
             f" ({source_url})" if source_url and status in {"found", "conflict", "stale"} else ""
         )
@@ -7793,132 +8006,296 @@ def _build_structured_field_evidence_answer(state: dict) -> str:
                 return row
         return None
 
-    lines: list[str] = [_structured_field_answer_title(state)]
-    overview = _first("program_overview")
-    if isinstance(overview, dict) and str(overview.get("status", "")).strip().lower() == "found":
-        overview_value = _clean_ledger_field_value(
-            "program_overview", str(overview.get("value", ""))
-        )
-        overview_url = _normalized_url(str(overview.get("source_url", "")))
-        if overview_url:
-            source_pool.append(overview_url)
-        if overview_value:
-            lines.extend(["", overview_value + (f" ({overview_url})" if overview_url else "")])
-
-    lines.extend(["", "Language of Instruction"])
-    lines.append(
-        _line(_first("language_of_instruction", "instruction_language"), "Language of instruction")
-    )
-
-    lines.extend(["", "IELTS / German Requirements"])
-    lines.append(_line(_first("language_requirements"), "Language requirement"))
-    lines.append(
-        _line(
-            _first("language_test_score_thresholds", "language_test_thresholds"),
-            "IELTS/TOEFL thresholds",
-        )
-    )
-    german_row = _first("german_language_requirement")
-    instruction_row = _first("language_of_instruction", "instruction_language")
-    language_row = _first("language_requirements")
-    selection_row = _first(
-        "selection_criteria", "competitiveness_signal", "admission_decision_signal"
-    )
-    if (
-        isinstance(german_row, dict)
-        and str(german_row.get("status", "")).strip().lower() != "found"
-        and isinstance(instruction_row, dict)
-        and str(instruction_row.get("status", "")).strip().lower() == "found"
-        and "english" in str(instruction_row.get("value", "")).lower()
-        and isinstance(language_row, dict)
-        and str(language_row.get("status", "")).strip().lower() == "found"
-    ):
-        lines.append(
-            "- German language requirement: No separate German requirement was verified for this English-taught MSc from the official evidence."
-        )
-    else:
-        lines.append(_line(german_row, "German language requirement"))
-
-    lines.extend(["", "GPA and ECTS Requirements"])
-    gpa_row = _first("gpa_or_grade_threshold", "gpa_threshold")
-    gpa_selection_fallback_used = False
-    if isinstance(gpa_row, dict) and str(gpa_row.get("status", "")).strip().lower() == "found":
-        lines.append(_line(gpa_row, "GPA / grade threshold"))
-    elif (
-        isinstance(selection_row, dict)
-        and str(selection_row.get("status", "")).strip().lower() == "found"
-    ):
-        selection_url = _normalized_url(str(selection_row.get("source_url", "")))
-        if selection_url:
-            source_pool.append(selection_url)
-        lines.append(
-            "- GPA / grade threshold: No fixed minimum GPA/grade threshold was found in the retrieved official evidence; "
-            "the final grade or grade average is used as a selection criterion."
-            + (f" ({selection_url})" if selection_url else "")
-        )
-        gpa_selection_fallback_used = True
-    else:
-        lines.append(_line(gpa_row, "GPA / grade threshold"))
-    lines.append(
-        _line(
-            _first(
-                "ects_or_subject_credit_requirements",
-                "ects_prerequisites",
-                "ects_or_prerequisite_credit_breakdown",
-            ),
-            "ECTS / prerequisite credit breakdown",
-        )
-    )
-
-    lines.extend(["", "Application Deadline"])
-    lines.append(
-        _line(_first("application_deadline", "international_deadline"), "Application deadline")
-    )
-
-    lines.extend(["", "Application Portal"])
-    lines.append(_line(_first("application_portal"), "Where to apply"))
-
-    fee_row = _first("tuition_or_semester_fee", "tuition_or_fees")
-    if fee_row:
-        lines.extend(["", "Fees"])
-        lines.append(_line(fee_row, "Fees"))
-
     prompt_text = " ".join(str(state.get("safe_user_prompt", "")).split()).strip().lower()
-    if re.search(r"\b(competitive|safe|chance|chances)\b", prompt_text):
-        lines.extend(["", "Admission Competitiveness"])
-        if selection_row and str(selection_row.get("status", "")).strip().lower() == "found":
-            lines.append(_line(selection_row, "Selection evidence"))
-            lines.append(
-                "- Verdict for ~3.2 GPA: Cannot be classified as safe from official evidence alone; use the verified selection criteria and any published cutoffs/capacity when available."
-            )
-        else:
-            lines.append(f"- Verdict for ~3.2 GPA: {_NOT_VERIFIED_OFFICIAL_DETAIL}")
 
-    missing_lines: list[str] = []
-    for row in rows[:16]:
-        label = (
-            " ".join(
-                str(row.get("label", row.get("field", row.get("id", "Field")))).split()
-            ).strip()
-            or "Field"
+    def _value_is_missing_marker(value: str) -> bool:
+        return _NOT_VERIFIED_OFFICIAL_DETAIL.lower() in str(value or "").lower()
+
+    def _row_found(row: dict | None) -> bool:
+        if not isinstance(row, dict) or str(row.get("status", "")).strip().lower() != "found":
+            return False
+        value = str(row.get("value") or row.get("evidence_snippet") or row.get("evidence_text") or "")
+        return not _value_is_missing_marker(value)
+
+    def _row_value(row: dict | None) -> str:
+        row = row if isinstance(row, dict) else {}
+        return _clean_ledger_field_value(
+            str(row.get("id", row.get("field", ""))).strip(),
+            str(row.get("value") or row.get("evidence_snippet") or row.get("evidence_text") or ""),
         )
-        status = str(row.get("status", "")).strip().lower()
-        if status == "found":
-            continue
-        field_id = str(row.get("id", row.get("field", ""))).strip()
-        if gpa_selection_fallback_used and field_id in {"gpa_or_grade_threshold", "gpa_threshold"}:
-            continue
-        missing_lines.append(f"- {label}: {_NOT_VERIFIED_OFFICIAL_DETAIL}")
-    if missing_lines:
-        lines.extend(["", "Missing or Uncertain Information"])
-        filtered_missing = []
-        for item in missing_lines:
-            if item.lower().startswith("- german language requirement:") and any(
-                "No separate German requirement was verified" in line for line in lines
-            ):
+
+    def _row_url(row: dict | None) -> str:
+        return _normalized_url(str((row or {}).get("source_url", ""))) if isinstance(row, dict) else ""
+
+    language_row = _first(
+        "english_language_requirement",
+        "language_requirements",
+        "language_requirement",
+        "language_of_instruction",
+        "instruction_language",
+    )
+    ielts_row = _first(
+        "ielts_score",
+        "language_test_score_thresholds",
+        "language_test_thresholds",
+    )
+    toefl_row = _first("toefl_score")
+    narrow_language_query = bool(
+        re.search(r"\b(ielts|toefl|duolingo|cefr|language requirement|english proficiency)\b", prompt_text)
+    ) and not bool(
+        re.search(
+            r"\b(deadline|tuition|fee|documents?|portal|gpa|ects|overview|curriculum|scholarship|funding)\b",
+            prompt_text,
+        )
+    )
+    if narrow_language_query:
+        lines: list[str] = [_structured_field_answer_title(state)]
+        source_pool = []
+        if _row_found(language_row):
+            value = _row_value(language_row) or "English language requirement is stated in the retrieved official evidence."
+            url = _row_url(language_row)
+            if url:
+                source_pool.append(url)
+            lines.extend(["", f"English requirement: {value}" + (f" ({url})" if url else "")])
+        else:
+            lines.extend(["", "English requirement: The retrieved evidence did not verify the requested language requirement."])
+        if _row_found(ielts_row):
+            value = _row_value(ielts_row) or "IELTS requirement is stated in the retrieved official evidence."
+            url = _row_url(ielts_row)
+            if url:
+                source_pool.append(url)
+            lines.append(f"IELTS score: {value}" + (f" ({url})" if url else ""))
+        elif "ielts" in prompt_text:
+            lines.append(
+                "IELTS score: The retrieved official evidence does not state a specific IELTS band score for this program."
+            )
+        if _row_found(toefl_row):
+            value = _row_value(toefl_row) or "TOEFL requirement is stated in the retrieved official evidence."
+            url = _row_url(toefl_row)
+            if url:
+                source_pool.append(url)
+            lines.append(f"TOEFL score: {value}" + (f" ({url})" if url else ""))
+        source_urls = _ordered_unique_urls(source_pool + evidence_urls)
+        if source_urls:
+            lines.extend(["", "Sources"])
+            for url in source_urls[:4]:
+                lines.append(f"- {url}")
+        return "\n".join(lines).strip()
+
+    query_plan = state.get("query_plan", {})
+    query_plan = query_plan if isinstance(query_plan, dict) else {}
+    intent = str(query_plan.get("detected_intent") or query_plan.get("intent") or "").strip()
+    if not intent:
+        topic_hits = sum(
+            1
+            for pattern in (
+                r"\b(deadline|application period|bewerbungsfrist)\b",
+                r"\b(ielts|toefl|duolingo|cefr|language|english proficiency)\b",
+                r"\b(tuition|fee|semesterbeitrag)\b",
+                r"\b(documents?|checklist|transcript|certificate)\b",
+                r"\b(portal|where to apply|uni-assist)\b",
+                r"\b(gpa|ects|eligibility|requirements?)\b",
+            )
+            if re.search(pattern, prompt_text)
+        )
+        if re.search(r"\b(compare|comparison|versus| vs )\b", prompt_text):
+            intent = "comparison_lookup"
+        elif prompt_text.startswith("tell me about ") or topic_hits > 1:
+            intent = "admission_requirement_lookup"
+        elif re.search(r"\b(deadline|application period|bewerbungsfrist)\b", prompt_text):
+            intent = "deadline_lookup"
+        elif re.search(r"\b(ielts|toefl|duolingo|cefr|language|english proficiency)\b", prompt_text):
+            intent = "language_requirement_lookup"
+        elif re.search(r"\b(tuition|fee|semesterbeitrag)\b", prompt_text):
+            intent = "tuition_fee_lookup"
+        elif re.search(r"\b(documents?|checklist|transcript|certificate)\b", prompt_text):
+            intent = "document_requirement_lookup"
+        else:
+            intent = "general_program_overview"
+
+    required_from_plan = query_plan.get("required_fields", [])
+    required_from_plan = required_from_plan if isinstance(required_from_plan, list) else []
+    optional_from_plan = query_plan.get("optional_fields", [])
+    optional_from_plan = optional_from_plan if isinstance(optional_from_plan, list) else []
+    excluded_from_plan = query_plan.get("excluded_fields", [])
+    excluded = {
+        str(item).strip()
+        for item in excluded_from_plan
+        if str(item).strip()
+    } if isinstance(excluded_from_plan, list) else set()
+
+    intent_fields: dict[str, list[str]] = {
+        "deadline_lookup": ["application_deadline", "international_deadline", "other_semester_deadline", "intake_or_semester"],
+        "language_requirement_lookup": [
+            "english_language_requirement",
+            "language_requirements",
+            "language_requirement",
+            "language_of_instruction",
+            "instruction_language",
+            "ielts_score",
+            "toefl_score",
+            "duolingo_score",
+            "german_language_requirement",
+            "language_test_score_thresholds",
+            "language_test_thresholds",
+        ],
+        "tuition_fee_lookup": ["tuition_fee", "semester_contribution", "tuition_or_semester_fee", "tuition_or_fees"],
+        "document_requirement_lookup": [
+            "required_application_documents",
+            "international_applicant_documents",
+            "degree_transcript_requirements",
+            "language_proof",
+            "aps_requirement",
+            "vpd_requirement",
+            "uni_assist_requirement",
+        ],
+        "application_portal_lookup": ["application_portal", "application_process", "uni_assist_requirement", "vpd_requirement"],
+        "comparison_lookup": [str(row.get("id", row.get("field", ""))).strip() for row in rows],
+    }
+    requested_ids = [
+        str(item).strip()
+        for item in [*required_from_plan, *optional_from_plan]
+        if str(item).strip()
+    ] or intent_fields.get(intent, [])
+    if intent in intent_fields:
+        allowed = set(intent_fields[intent])
+        requested_ids = [field_id for field_id in requested_ids if field_id in allowed]
+    requested_ids = [field_id for field_id in dict.fromkeys(requested_ids) if field_id not in excluded]
+
+    label_by_field = {
+        "application_deadline": "Application deadline",
+        "international_deadline": "Application deadline",
+        "other_semester_deadline": "Other semester deadline",
+        "intake_or_semester": "Intake",
+        "english_language_requirement": "English requirement",
+        "language_requirements": "Language requirement",
+        "language_requirement": "Language requirement",
+        "language_of_instruction": "Language of instruction",
+        "instruction_language": "Language of instruction",
+        "ielts_score": "IELTS score",
+        "toefl_score": "TOEFL score",
+        "duolingo_score": "Duolingo score",
+        "german_language_requirement": "German language requirement",
+        "tuition_fee": "Tuition fee",
+        "semester_contribution": "Semester contribution",
+        "tuition_or_semester_fee": "Fees",
+        "tuition_or_fees": "Fees",
+        "required_application_documents": "Required application documents",
+        "international_applicant_documents": "International applicant documents",
+        "degree_transcript_requirements": "Transcript requirements",
+        "language_proof": "Language proof",
+        "aps_requirement": "APS requirement",
+        "vpd_requirement": "VPD requirement",
+        "uni_assist_requirement": "uni-assist requirement",
+        "application_portal": "Where to apply",
+        "application_process": "Application process",
+        "academic_eligibility": "Academic eligibility",
+        "gpa_requirement": "GPA / grade threshold",
+        "gpa_or_grade_threshold": "GPA / grade threshold",
+        "ects_prerequisites": "ECTS / prerequisite credits",
+        "ects_or_prerequisite_credit_breakdown": "ECTS / prerequisite credits",
+        "ects_or_subject_credit_requirements": "ECTS / prerequisite credit breakdown",
+        "language_test_score_thresholds": "IELTS/TOEFL thresholds",
+        "language_test_thresholds": "IELTS/TOEFL thresholds",
+        "language_requirements": "Language requirement",
+    }
+
+    def _render_field(field_id: str) -> str:
+        row = _first(field_id)
+        label = label_by_field.get(field_id, field_id.replace("_", " ").title())
+        return _line(row, label)
+
+    lines: list[str] = [_structured_field_answer_title(state)]
+    if intent == "comparison_lookup":
+        lines.extend(["", "| Field | Answer | Source |", "| --- | --- | --- |"])
+        for field_id in requested_ids[:10]:
+            row = _first(field_id)
+            row = row if isinstance(row, dict) else {}
+            status = str(row.get("status", "")).strip().lower()
+            if status != "found":
                 continue
-            filtered_missing.append(item)
-        lines.extend(filtered_missing[:8])
+            value = _row_value(row) or "Stated in the retrieved official evidence."
+            url = _row_url(row)
+            if url:
+                source_pool.append(url)
+            lines.append(f"| {label_by_field.get(field_id, field_id.replace('_', ' ').title())} | {value} | {url} |")
+    elif intent == "document_requirement_lookup":
+        lines.extend(["", "Checklist"])
+        for field_id in requested_ids:
+            lines.append(_render_field(field_id))
+    elif intent in {"general_program_overview", "program_overview_lookup", "admission_requirement_lookup", "eligibility_check"}:
+        section_groups = [
+            ("Overview", ["program_overview", "program_duration", "degree_level"]),
+            ("Language of Instruction", ["language_of_instruction", "instruction_language"]),
+            ("IELTS / German Requirements", ["english_language_requirement", "language_requirements", "language_requirement", "language_test_score_thresholds", "language_test_thresholds", "ielts_score", "toefl_score", "german_language_requirement"]),
+            ("GPA and ECTS Requirements", ["academic_eligibility", "gpa_requirement", "gpa_or_grade_threshold", "gpa_threshold", "ects_prerequisites", "ects_or_prerequisite_credit_breakdown", "ects_or_subject_credit_requirements", "required_degree_background"]),
+            ("Application Deadline", ["application_deadline", "international_deadline"]),
+            ("Application Portal", ["application_portal", "application_process"]),
+            ("Fees", ["tuition_fee", "semester_contribution", "tuition_or_semester_fee", "tuition_or_fees"]),
+        ]
+        requested_set = set(requested_ids) if requested_ids else {str(row.get("id", row.get("field", ""))).strip() for row in rows}
+        if not requested_ids and "gpa" in prompt_text:
+            requested_set.add("gpa_threshold")
+        for title, field_ids in section_groups:
+            section_lines = []
+            for field_id in field_ids:
+                if field_id not in requested_set or field_id in excluded:
+                    continue
+                if field_id in {"gpa_requirement", "gpa_or_grade_threshold", "gpa_threshold"}:
+                    gpa_row = _first("gpa_requirement", "gpa_or_grade_threshold", "gpa_threshold")
+                    selection_row = _first("selection_criteria", "competitiveness_signal", "admission_decision_signal")
+                    if (
+                        (not isinstance(gpa_row, dict) or str(gpa_row.get("status", "")).strip().lower() != "found")
+                        and isinstance(selection_row, dict)
+                        and str(selection_row.get("status", "")).strip().lower() == "found"
+                    ):
+                        selection_url = _normalized_url(str(selection_row.get("source_url", "")))
+                        if selection_url:
+                            source_pool.append(selection_url)
+                        section_lines.append(
+                            "- GPA / grade threshold: No fixed minimum GPA/grade threshold was found in the retrieved official evidence; "
+                            "the final grade or grade average is used as a selection criterion."
+                            + (f" ({selection_url})" if selection_url else "")
+                        )
+                        continue
+                if field_id == "german_language_requirement":
+                    german_row = _first("german_language_requirement")
+                    instruction_row = _first("language_of_instruction", "instruction_language")
+                    language_requirement_row = _first(
+                        "english_language_requirement", "language_requirements", "language_requirement"
+                    )
+                    if (
+                        isinstance(german_row, dict)
+                        and str(german_row.get("status", "")).strip().lower() != "found"
+                        and isinstance(instruction_row, dict)
+                        and str(instruction_row.get("status", "")).strip().lower() == "found"
+                        and "english" in str(instruction_row.get("value", "")).lower()
+                        and isinstance(language_requirement_row, dict)
+                        and str(language_requirement_row.get("status", "")).strip().lower() == "found"
+                    ):
+                        section_lines.append(
+                            "- German language requirement: No separate German requirement was verified for this English-taught MSc from the official evidence."
+                        )
+                        continue
+                section_lines.append(_render_field(field_id))
+            if section_lines:
+                lines.extend(["", title, *section_lines])
+        if re.search(r"\b(competitive|safe|chance|chances)\b", prompt_text):
+            selection_row = _first("selection_criteria", "competitiveness_signal", "admission_decision_signal")
+            lines.extend(["", "Admission Competitiveness"])
+            if selection_row and str(selection_row.get("status", "")).strip().lower() == "found":
+                lines.append(_line(selection_row, "Selection evidence"))
+                lines.append(
+                    "- Verdict for ~3.2 GPA: Cannot be classified as safe from official evidence alone; use the verified selection criteria and any published cutoffs/capacity when available."
+                )
+            else:
+                lines.append(
+                    "- Verdict for ~3.2 GPA: The retrieved official evidence does not state "
+                    "enough information to classify this profile as safe."
+                )
+    else:
+        for field_id in requested_ids:
+            lines.append(_render_field(field_id))
 
     if _is_german_university_state(state) and evidence_urls:
         source_urls = _ordered_unique_urls(evidence_urls)
@@ -7933,6 +8310,15 @@ def _build_structured_field_evidence_answer(state: dict) -> str:
 
 def _should_prefer_structured_field_evidence_answer(state: dict) -> bool:
     if not _is_admissions_requirements_query(state):
+        return False
+    query_plan = state.get("query_plan", {})
+    query_plan = query_plan if isinstance(query_plan, dict) else {}
+    intent = str(query_plan.get("detected_intent") or query_plan.get("intent") or "").strip()
+    if bool(state.get("unigraph_answered_required_field")) and intent in {
+        "deadline_lookup",
+        "language_requirement_lookup",
+        "tuition_fee_lookup",
+    }:
         return False
     rows = state.get("coverage_ledger", [])
     if not isinstance(rows, list) or not rows:
@@ -8016,8 +8402,10 @@ def _build_structured_comparison_from_evidence(state: dict) -> str:
             [
                 f"{entity}:",
                 f"- Program details: {evidence_text} ({url})",
-                f"- Eligibility requirements: {_NOT_VERIFIED_OFFICIAL_DETAIL} ({url})",
-                f"- Application deadline: {_NOT_VERIFIED_OFFICIAL_DETAIL} ({url})",
+                "- Eligibility requirements: The retrieved official evidence does not state "
+                f"this requested detail. ({url})",
+                "- Application deadline: The retrieved official evidence does not state a "
+                f"separate deadline for this case. ({url})",
             ]
         )
 
@@ -8557,9 +8945,29 @@ async def _prepare_request(
 
 async def _finalize_success(context: dict, result: str) -> str:
     state = context["state"]
+    before_sanitizer = str(result or "")
+    if not state.get("final_answer_source"):
+        state["final_answer_source"] = "llm_synthesis"
+    if "final_prompt_used" not in state:
+        state["final_prompt_used"] = state["final_answer_source"] == "llm_synthesis"
+    raw_span_rendered = _final_answer_has_raw_output(before_sanitizer)
+    state["raw_span_rendered"] = bool(raw_span_rendered)
+    result = _sanitize_final_user_answer(before_sanitizer)
+    state["final_answer_before_sanitizer"] = before_sanitizer
+    state["final_answer_after_sanitizer"] = result
+    logger.info(
+        "FinalAnswerPath | final_answer_source=%s | final_prompt_used=%s | raw_span_rendered=%s | final_answer_before_sanitizer=%s | final_answer_after_sanitizer=%s",
+        state.get("final_answer_source", ""),
+        bool(state.get("final_prompt_used", False)),
+        bool(state.get("raw_span_rendered", False)),
+        before_sanitizer[:500],
+        result[:500],
+    )
     result = _apply_answer_policy(result, state)
     result = _append_uncertainty_section(result, state)
     result = _append_missing_info_section(result, state)
+    result = _sanitize_final_user_answer(result)
+    state["final_answer_after_sanitizer"] = result
     state["abstain_reason"] = _derive_abstain_reason(result, state)
     state["quality"] = _compute_quality_metrics(
         query=str(context["safe_user_prompt"]),
@@ -8719,12 +9127,6 @@ async def generate_response(
             state["llm_usage"]["total_tokens"],
         )
     result = await _finalize_success(context, result)
-    if debug:
-        debug_payload = state.get("unigraph_debug", {})
-        return {
-            "response": result,
-            "debug": debug_payload if isinstance(debug_payload, dict) else {},
-        }
     return result
 
 
@@ -8815,6 +9217,8 @@ async def generate_response_stream(
             state=state,
         ):
             result = structured_answer
+            state["final_answer_source"] = "field_renderer"
+            state["final_prompt_used"] = False
             emit_trace_event(
                 "answer_ledger_first_used",
                 {
@@ -8864,6 +9268,8 @@ async def generate_response_stream(
                     result = recovered
                     stream_issues = recovered_issues
                     state["agent_last_issues"] = stream_issues
+                    state["final_answer_source"] = "fallback_builder"
+                    state["final_prompt_used"] = False
                     state["output_guard_reason"] = "stream_verification_partial"
                     emit_trace_event(
                         "answer_partial_with_field_evidence_recovery",

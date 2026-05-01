@@ -17,6 +17,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from functools import lru_cache
+from pathlib import Path
 from uuid import uuid4
 
 import boto3
@@ -36,6 +37,7 @@ _TRACE_EVENT_MAX_PAYLOAD_CHARS = 800
 _TRACE_MAX_EVENTS_PER_JOB = 120
 _TRACE_APPEND_MAX_ATTEMPTS = 4
 _TRACE_APPEND_BASE_DELAY_SECONDS = 0.05
+DEBUG_ARTIFACT_DIR = os.getenv("UNIGRAPH_DEBUG_DIR", "data/debug/unigraph")
 _VALID_STATUSES = {
     _JOB_STATUS_QUEUED,
     _JOB_STATUS_PROCESSING,
@@ -149,6 +151,117 @@ def _dynamodb_json_safe(value):
         return json.loads(json.dumps(value, ensure_ascii=False, default=str), parse_float=Decimal)
     except Exception:
         return {}
+
+
+_DEBUG_MAX_JSON_CHARS = 120_000
+_DEBUG_DEFAULT_LIST_LIMIT = 25
+_DEBUG_LIST_LIMITS = {
+    "raw_search_results": 3,
+    "fan_out_search_results": 3,
+    "chunks_created_detail": 0,
+    "selected_evidence_chunks": 12,
+    "evidence_passed_to_final_answer": 12,
+    "evidence_passed_to_final_llm": 12,
+    "field_mapped_evidence": 12,
+    "excluded_evidence_chunks": 40,
+    "excluded_chunks_with_reasons": 40,
+    "skipped_urls": 60,
+    "rejected_urls_with_reasons": 60,
+    "rejected_pdfs": 40,
+    "source_scores": 40,
+}
+
+
+def _debug_list_limit(key: str) -> int:
+    return _DEBUG_LIST_LIMITS.get(str(key), _DEBUG_DEFAULT_LIST_LIMIT)
+
+
+def _compact_debug_value(value, *, key: str = ""):
+    if isinstance(value, dict):
+        return {
+            str(item_key): _compact_debug_value(item_value, key=str(item_key))
+            for item_key, item_value in value.items()
+        }
+    if isinstance(value, list):
+        limit = _debug_list_limit(key)
+        if limit <= 0:
+            return [{"_truncated": True, "omitted_count": len(value)}] if value else []
+        compacted = [_compact_debug_value(item, key=key) for item in value[:limit]]
+        if len(value) > limit:
+            compacted.append({"_truncated": True, "omitted_count": len(value) - limit})
+        return compacted
+    if isinstance(value, str):
+        max_chars = 700 if key in {"text", "snippet", "content", "chunks"} else 2000
+        if len(value) > max_chars:
+            return value[:max_chars] + f"... [truncated {len(value) - max_chars} chars]"
+        return value
+    return value
+
+
+def _compact_debug_info(debug_info: dict) -> dict:
+    compacted = _compact_debug_value(debug_info)
+    if isinstance(compacted, dict):
+        compacted["_debug_truncated_for_storage"] = True
+    try:
+        serialized = json.dumps(compacted, ensure_ascii=False, default=str)
+    except Exception:
+        return {"_debug_truncated_for_storage": True, "error": "debug_not_serializable"}
+    if len(serialized) <= _DEBUG_MAX_JSON_CHARS:
+        return compacted
+    summary_keys = [
+        "request_id",
+        "current_question",
+        "original_question",
+        "detected_intent",
+        "detected_university",
+        "detected_program",
+        "resolved_official_domains",
+        "retrieval_tier_used",
+        "fallback_tier_used",
+        "decomposition_fallback_used",
+        "planner_type",
+        "fallback_error",
+        "generated_queries",
+        "generated_search_queries",
+        "selected_urls",
+        "rejected_urls_with_reasons",
+        "rejected_pdfs",
+        "selected_evidence_chunks",
+        "fields_missing_with_reason",
+        "final_answer_shape",
+        "final_confidence",
+    ]
+    summary = {
+        key: _compact_debug_value(debug_info.get(key), key=key)
+        for key in summary_keys
+        if key in debug_info
+    }
+    summary["_debug_truncated_for_storage"] = True
+    summary["_debug_original_size_chars"] = len(serialized)
+    return summary
+
+
+def _debug_artifact_dir() -> Path:
+    return Path(os.getenv("UNIGRAPH_DEBUG_DIR", DEBUG_ARTIFACT_DIR)).expanduser()
+
+
+def _write_debug_artifact(debug_info: dict) -> str:
+    request_id = str(debug_info.get("request_id") or uuid4().hex).strip()
+    safe_request_id = "".join(
+        char if char.isalnum() or char in {"-", "_", ".", ":"} else "-" for char in request_id
+    ).strip("-")
+    timestamp = _utc_now().strftime("%Y%m%dT%H%M%S%fZ")
+    debug_dir = _debug_artifact_dir()
+    debug_dir.mkdir(parents=True, exist_ok=True)
+    path = debug_dir / f"{timestamp}-{safe_request_id or uuid4().hex}.json"
+    tmp_path = path.with_suffix(".tmp")
+    tmp_path.write_text(
+        json.dumps(debug_info, ensure_ascii=False, indent=2, default=str),
+        encoding="utf-8",
+    )
+    tmp_path.replace(path)
+    logger.info("Async chat debug artifact written | path=%s", path)
+    return str(path)
 
 
 def _put_initial_job(job: dict) -> None:
@@ -323,7 +436,7 @@ def mark_job_completed(job_id: str, answer: str, debug_info: dict | None = None)
         "updated_at": now_iso,
     }
     if isinstance(debug_info, dict) and debug_info:
-        updates["debug"] = _dynamodb_json_safe(debug_info)
+        updates["debug_artifact_path"] = _write_debug_artifact(debug_info)
     _update_job(job_id, updates)
 
 

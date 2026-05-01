@@ -53,6 +53,40 @@ def test_mark_job_failed_preserves_invalid_payload_error(monkeypatch):
     assert captured[0][1]["error"] == "Invalid async job payload."
 
 
+def test_mark_job_completed_writes_debug_artifact_not_dynamodb_debug(monkeypatch, tmp_path):
+    captured = []
+    monkeypatch.setattr(
+        llm_async_queue_service,
+        "_update_job",
+        lambda job_id, updates: captured.append((job_id, updates)),
+    )
+    monkeypatch.setattr(llm_async_queue_service, "_now_iso", lambda: "2026-03-11T00:00:00+00:00")
+    monkeypatch.setenv("UNIGRAPH_DEBUG_DIR", str(tmp_path))
+
+    llm_async_queue_service.mark_job_completed(
+        "job-debug",
+        "answer",
+        debug_info={
+            "request_id": "unigraph-1",
+            "raw_search_results": [
+                {"query": "q", "results": [{"snippet": "x" * 5000} for _ in range(10)]}
+                for _ in range(20)
+            ],
+            "chunks_created_detail": [{"chunks": ["y" * 5000 for _ in range(20)]}],
+            "selected_evidence_chunks": [{"text": "z" * 5000} for _ in range(20)],
+            "rejected_urls_with_reasons": [{"url": f"https://example.edu/{i}"} for i in range(100)],
+        },
+    )
+
+    updates = captured[0][1]
+    assert "debug" not in updates
+    artifact_path = updates["debug_artifact_path"]
+    assert artifact_path.endswith(".json")
+    artifact_text = tmp_path.joinpath(artifact_path.split("/")[-1]).read_text(encoding="utf-8")
+    assert '"request_id": "unigraph-1"' in artifact_text
+    assert '"raw_search_results"' in artifact_text
+
+
 def test_append_job_trace_event_sanitizes_payload(monkeypatch):
     captured = {}
 
